@@ -1,0 +1,30 @@
+name: Sync Upstream
+
+on:
+  schedule:
+    - cron: '0 0 * * *'  # Chạy 1 lần/ngày lúc 00:00 UTC
+  workflow_dispatch:  # Cho phép trigger manual
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Sync from upstream
+        run: |
+          git remote add upstream https://github.com/router-for-me/CLIProxyAPIPlus.git || true
+          git pull upstream main --rebase
+          git push origin main
