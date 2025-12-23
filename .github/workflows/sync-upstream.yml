@@ -2,7 +2,7 @@ name: Sync Upstream
 
 on:
   schedule:
-    - cron: '0 0 * * *'  # Chạy 1 lần/ngày lúc 00:00 UTC
+    - cron: '*/5 * * * *'  # Chạy mỗi 5 phút
   workflow_dispatch:  # Cho phép trigger manual
 
 permissions:
@@ -27,4 +27,4 @@ jobs:
         run: |
           git remote add upstream https://github.com/router-for-me/CLIProxyAPIPlus.git || true
           git pull upstream main --rebase
-          git push origin main
+          git push origin main --force-with-lease
