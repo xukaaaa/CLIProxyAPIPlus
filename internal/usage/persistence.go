@@ -13,7 +13,7 @@ import (
 
 const (
 	usageStatsFileName   = "usage_stats.json"
-	autoSaveInterval     = 5 * time.Minute
+	autoSaveInterval     = 1 * time.Minute
 	defaultMaxDetailsAge = 30 * 24 * time.Hour // 30 days
 )
 
