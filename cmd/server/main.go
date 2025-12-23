@@ -450,6 +450,16 @@ func main() {
 	} else {
 		cfg.AuthDir = resolvedAuthDir
 	}
+
+	// Initialize usage statistics persistence
+	if cfg.UsageStatisticsEnabled {
+		if err := usage.SetPersistencePath(cfg.AuthDir); err != nil {
+			log.Warnf("failed to set usage persistence path: %v", err)
+		} else if err := usage.LoadFromFile(); err != nil {
+			log.Warnf("failed to load usage statistics: %v", err)
+		}
+	}
+
 	managementasset.SetCurrentConfig(cfg)
 
 	// Create login options to be used in authentication flows.

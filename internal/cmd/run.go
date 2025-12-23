@@ -12,6 +12,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/api"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy"
 	log "github.com/sirupsen/logrus"
 )
@@ -25,6 +26,12 @@ import (
 //   - configPath: The path to the configuration file
 //   - localPassword: Optional password accepted for local management requests
 func StartService(cfg *config.Config, configPath string, localPassword string) {
+	// Start usage statistics auto-save if enabled
+	if cfg.UsageStatisticsEnabled {
+		usage.StartAutoSave()
+		defer usage.StopAutoSave()
+	}
+
 	builder := cliproxy.NewBuilder().
 		WithConfig(cfg).
 		WithConfigPath(configPath).
