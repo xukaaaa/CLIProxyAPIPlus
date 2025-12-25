@@ -982,6 +982,9 @@ func (s *Server) UpdateClients(cfg *config.Config) {
 
 	s.handlers.UpdateClients(&cfg.SDKConfig)
 
+	// Reload quota policies when config changes
+	quota.GetManager().LoadPolicies(&cfg.SDKConfig)
+
 	if !cfg.RemoteManagement.DisableControlPanel {
 		staticDir := managementasset.StaticDir(s.configFilePath)
 		go managementasset.EnsureLatestManagementHTML(context.Background(), staticDir, cfg.ProxyURL, cfg.RemoteManagement.PanelGitHubRepository)
