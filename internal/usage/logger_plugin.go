@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/quota"
 	coreusage "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
 )
 
@@ -48,6 +49,18 @@ func (p *LoggerPlugin) HandleUsage(ctx context.Context, record coreusage.Record)
 		return
 	}
 	p.stats.Record(ctx, record)
+
+	// Update quota usage if API key is present
+	if record.APIKey != "" && !record.Failed {
+		detail := record.Detail
+		quota.GetManager().UpdateUsage(
+			record.APIKey,
+			record.Model,
+			detail.InputTokens,
+			detail.OutputTokens,
+			detail.CachedTokens,
+		)
+	}
 }
 
 // SetStatisticsEnabled toggles whether in-memory statistics are recorded.
