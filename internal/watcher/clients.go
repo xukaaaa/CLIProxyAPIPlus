@@ -80,6 +80,10 @@ func (w *Watcher) reloadClients(rescanAuth bool, affectedOAuthProviders []string
 					return nil
 				}
 				if !info.IsDir() && strings.HasSuffix(strings.ToLower(info.Name()), ".json") {
+					// Exclude usage_stats.json - it's managed separately by the usage package
+					if strings.EqualFold(info.Name(), "usage_stats.json") {
+						return nil
+					}
 					if data, errReadFile := os.ReadFile(path); errReadFile == nil && len(data) > 0 {
 						sum := sha256.Sum256(data)
 						normalizedPath := w.normalizeAuthPath(path)
@@ -191,6 +195,10 @@ func (w *Watcher) loadFileClients(cfg *config.Config) int {
 			return err
 		}
 		if !info.IsDir() && strings.HasSuffix(strings.ToLower(info.Name()), ".json") {
+			// Exclude usage_stats.json - it's managed separately by the usage package
+			if strings.EqualFold(info.Name(), "usage_stats.json") {
+				return nil
+			}
 			authFileCount++
 			log.Debugf("processing auth file %d: %s", authFileCount, filepath.Base(path))
 			if data, errCreate := os.ReadFile(path); errCreate == nil && len(data) > 0 {

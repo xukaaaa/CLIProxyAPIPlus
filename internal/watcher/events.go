@@ -97,6 +97,10 @@ func (w *Watcher) handleEvent(event fsnotify.Event) {
 	isConfigEvent := normalizedName == normalizedConfigPath && event.Op&configOps != 0
 	authOps := fsnotify.Create | fsnotify.Write | fsnotify.Remove | fsnotify.Rename
 	isAuthJSON := strings.HasPrefix(normalizedName, normalizedAuthDir) && strings.HasSuffix(normalizedName, ".json") && event.Op&authOps != 0
+	// Exclude usage_stats.json from watcher - it's managed separately by the usage package
+	if isAuthJSON && strings.EqualFold(filepath.Base(normalizedName), "usage_stats.json") {
+		return
+	}
 	isKiroIDEToken := w.isKiroIDETokenFile(event.Name) && event.Op&authOps != 0
 	if !isConfigEvent && !isAuthJSON && !isKiroIDEToken {
 		// Ignore unrelated files (e.g., cookie snapshots *.cookie) and other noise.
