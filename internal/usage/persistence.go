@@ -1,6 +1,7 @@
 package usage
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -17,11 +18,18 @@ const (
 	defaultMaxDetailsAge = 30 * 24 * time.Hour // 30 days
 )
 
+// GitPersister is an interface for persisting files to git.
+type GitPersister interface {
+	PersistAuthFiles(ctx context.Context, message string, paths ...string) error
+}
+
 var (
 	persistenceMu   sync.Mutex
 	persistencePath string
 	stopAutoSave    chan struct{}
 	autoSaveRunning bool
+	gitPersister    GitPersister
+	dataLoaded      bool
 )
 
 // persistedData is the JSON structure saved to disk.
@@ -48,6 +56,14 @@ type persistedModel struct {
 	TotalRequests int64           `json:"total_requests"`
 	TotalTokens   int64           `json:"total_tokens"`
 	Details       []RequestDetail `json:"details"`
+}
+
+// SetGitPersister sets the git persister for usage statistics.
+// This should be called during server startup when using GitStore.
+func SetGitPersister(p GitPersister) {
+	persistenceMu.Lock()
+	gitPersister = p
+	persistenceMu.Unlock()
 }
 
 // SetPersistencePath configures the directory where usage_stats.json will be stored.
@@ -95,6 +111,10 @@ func LoadFromFile() error {
 	if err != nil {
 		if os.IsNotExist(err) {
 			log.Debugf("Usage stats file does not exist, starting fresh: %s", path)
+			// Mark data as loaded - safe to save now (starting fresh is valid)
+			persistenceMu.Lock()
+			dataLoaded = true
+			persistenceMu.Unlock()
 			return nil
 		}
 		return fmt.Errorf("failed to read usage stats file: %w", err)
@@ -156,6 +176,12 @@ func LoadFromFile() error {
 	}
 
 	log.Infof("Loaded usage statistics from %s (total requests: %d)", path, stats.totalRequests)
+
+	// Mark data as loaded - safe to save now
+	persistenceMu.Lock()
+	dataLoaded = true
+	persistenceMu.Unlock()
+
 	return nil
 }
 
@@ -163,10 +189,17 @@ func LoadFromFile() error {
 func SaveToFile() error {
 	persistenceMu.Lock()
 	path := persistencePath
+	loaded := dataLoaded
 	persistenceMu.Unlock()
 
 	if path == "" {
 		return fmt.Errorf("persistence path not set")
+	}
+
+	// Guard against saving before data is loaded
+	if !loaded {
+		log.Debug("Skipping usage stats save - data not yet loaded")
+		return nil
 	}
 
 	stats := GetRequestStatistics()
@@ -232,6 +265,19 @@ func SaveToFile() error {
 	}
 
 	log.Debugf("Saved usage statistics to %s", path)
+
+	// Persist to git if available
+	persistenceMu.Lock()
+	gp := gitPersister
+	persistenceMu.Unlock()
+	if gp != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if err := gp.PersistAuthFiles(ctx, "Update usage statistics", path); err != nil {
+			log.Warnf("Failed to persist usage stats to git: %v", err)
+		}
+	}
+
 	return nil
 }
 
@@ -262,7 +308,7 @@ func StartAutoSave() {
 		}
 	}()
 
-	log.Info("Usage statistics auto-save started (interval: 5 minutes)")
+	log.Info("Usage statistics auto-save started (interval: 1 minute)")
 }
 
 // StopAutoSave stops the background auto-save goroutine and performs a final save.

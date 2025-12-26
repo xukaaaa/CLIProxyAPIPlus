@@ -458,6 +458,10 @@ func main() {
 		} else if err := usage.LoadFromFile(); err != nil {
 			log.Warnf("failed to load usage statistics: %v", err)
 		}
+		// Set git persister if using GitStore
+		if useGitStore && gitStoreInst != nil {
+			usage.SetGitPersister(gitStoreInst)
+		}
 	}
 
 	managementasset.SetCurrentConfig(cfg)
