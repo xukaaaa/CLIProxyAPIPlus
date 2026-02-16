@@ -238,7 +238,7 @@ nonstream-keepalive-interval: 0
 # claudecode:
 #   # Claude Code Model Mappings
 #   # Route unavailable Claude Code models to alternative models available in your local proxy.
-#   # Useful when Claude Code CLI requests models you don't have access to (e.g., Claude Opus)
+#   # Useful when Claude Code CLI requests models you dont have access to (e.g., Claude Opus)
 #   # but you have a similar model available (e.g., Gemini Flash).
 #   model-mappings:
 #     - from: "claude-3-opus"                       # Model requested by Claude Code CLI

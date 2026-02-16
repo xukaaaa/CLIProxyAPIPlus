@@ -782,7 +782,13 @@ func (cfg *Config) SanitizeOAuthModelAlias() {
 	out := make(map[string][]OAuthModelAlias, len(cfg.OAuthModelAlias))
 	for rawChannel, aliases := range cfg.OAuthModelAlias {
 		channel := strings.ToLower(strings.TrimSpace(rawChannel))
-		if channel == "" || len(aliases) == 0 {
+		if channel == "" {
+			continue
+		}
+		// Preserve channels that were explicitly set to empty/nil – they act
+		// as "disabled" markers so default injection won't re-add them (#222).
+		if len(aliases) == 0 {
+			out[channel] = nil
 			continue
 		}
 		seenAlias := make(map[string]struct{}, len(aliases))
@@ -1050,10 +1056,10 @@ func SaveConfigPreserveComments(configFile string, cfg *Config) error {
 	removeLegacyOpenAICompatAPIKeys(original.Content[0])
 	removeLegacyAmpKeys(original.Content[0])
 	removeLegacyGenerativeLanguageKeys(original.Content[0])
+	pruneMappingToGeneratedKeys(original.Content[0], generated.Content[0], "api-key-policies")
 
 	pruneMappingToGeneratedKeys(original.Content[0], generated.Content[0], "oauth-excluded-models")
 	pruneMappingToGeneratedKeys(original.Content[0], generated.Content[0], "oauth-model-alias")
-	pruneMappingToGeneratedKeys(original.Content[0], generated.Content[0], "api-key-policies")
 
 	// Merge generated into original in-place, preserving comments/order of existing nodes.
 	mergeMappingPreserve(original.Content[0], generated.Content[0])

@@ -236,16 +236,6 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 		changes = append(changes, fmt.Sprintf("ampcode.upstream-api-keys: updated (%d -> %d entries)", oldUpstreamAPIKeysCount, newUpstreamAPIKeysCount))
 	}
 
-	// ClaudeCode settings
-	oldClaudeCodeMappings := SummarizeAmpModelMappings(oldCfg.ClaudeCode.ModelMappings)
-	newClaudeCodeMappings := SummarizeAmpModelMappings(newCfg.ClaudeCode.ModelMappings)
-	if oldClaudeCodeMappings.hash != newClaudeCodeMappings.hash {
-		changes = append(changes, fmt.Sprintf("claudecode.model-mappings: updated (%d -> %d entries)", oldClaudeCodeMappings.count, newClaudeCodeMappings.count))
-	}
-	if oldCfg.ClaudeCode.ForceModelMappings != newCfg.ClaudeCode.ForceModelMappings {
-		changes = append(changes, fmt.Sprintf("claudecode.force-model-mappings: %t -> %t", oldCfg.ClaudeCode.ForceModelMappings, newCfg.ClaudeCode.ForceModelMappings))
-	}
-
 	if entries, _ := DiffOAuthExcludedModelChanges(oldCfg.OAuthExcludedModels, newCfg.OAuthExcludedModels); len(entries) > 0 {
 		changes = append(changes, entries...)
 	}

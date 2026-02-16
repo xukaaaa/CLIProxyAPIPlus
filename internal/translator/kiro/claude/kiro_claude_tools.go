@@ -307,12 +307,6 @@ func RepairJSON(jsonString string) string {
 			str = truncated
 		}
 
-		// If string is still open, close it
-		if inString {
-			str += "\""
-			log.Debugf("kiro: repairJSON - closing unclosed string")
-		}
-
 		// Add missing closing brackets
 		for braceCount > 0 {
 			str += "}"

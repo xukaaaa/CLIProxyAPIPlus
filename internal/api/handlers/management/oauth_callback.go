@@ -79,13 +79,8 @@ func (h *Handler) PostOAuthCallback(c *gin.Context) {
 		return
 	}
 	if sessionStatus != "" {
-		// Kiro uses status to store auth_url or device_code while still pending
-		isKiroPending := strings.EqualFold(sessionProvider, "kiro") &&
-			(strings.HasPrefix(sessionStatus, "auth_url|") || strings.HasPrefix(sessionStatus, "device_code|"))
-		if !isKiroPending {
-			c.JSON(http.StatusConflict, gin.H{"status": "error", "error": "oauth flow is not pending"})
-			return
-		}
+		c.JSON(http.StatusConflict, gin.H{"status": "error", "error": "oauth flow is not pending"})
+		return
 	}
 	if !strings.EqualFold(sessionProvider, canonicalProvider) {
 		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": "provider does not match state"})
