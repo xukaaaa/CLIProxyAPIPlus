@@ -11,9 +11,9 @@ import (
 // ConvertKiroResponseToOpenAIResponses converts Kiro streaming response to OpenAI Responses API SSE format.
 // Kiro executor generates Claude-compatible SSE format with "event:" prefix (e.g., "event: message_start\ndata: {...}").
 // We need to extract the "data:" line and pass it to the Claude translator which expects "data: {...}" format.
-func ConvertKiroResponseToOpenAIResponses(ctx context.Context, model string, originalRequest, request, rawResponse []byte, param *any) []string {
+func ConvertKiroResponseToOpenAIResponses(ctx context.Context, model string, originalRequest, request, rawResponse []byte, param *any) [][]byte {
 	raw := string(rawResponse)
-	var results []string
+	var results [][]byte
 
 	// Handle SSE format: extract "data:" lines from "event: xxx\ndata: {...}" format
 	lines := strings.Split(raw, "\n")
@@ -31,6 +31,6 @@ func ConvertKiroResponseToOpenAIResponses(ctx context.Context, model string, ori
 }
 
 // ConvertKiroResponseToOpenAIResponsesNonStream converts Kiro non-streaming response to OpenAI Responses API format.
-func ConvertKiroResponseToOpenAIResponsesNonStream(ctx context.Context, model string, originalRequest, request, rawResponse []byte, param *any) string {
+func ConvertKiroResponseToOpenAIResponsesNonStream(ctx context.Context, model string, originalRequest, request, rawResponse []byte, param *any) []byte {
 	return claudeResponses.ConvertClaudeResponseToOpenAIResponsesNonStream(ctx, model, originalRequest, request, rawResponse, param)
 }
