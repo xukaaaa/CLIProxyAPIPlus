@@ -320,6 +320,7 @@ func main() {
 			cfg.AuthDir = pgStoreInst.AuthDir()
 			log.Infof("postgres-backed token store enabled, workspace path: %s", pgStoreInst.WorkDir())
 		}
+		pgStoreInst.StartListener(context.Background())
 	} else if useObjectStore {
 		if objectStoreLocalPath == "" {
 			if writableBase != "" {
