@@ -2,7 +2,9 @@ package store
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,8 +13,11 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
@@ -23,6 +28,15 @@ const (
 	defaultConfigTable = "config_store"
 	defaultAuthTable   = "auth_store"
 	defaultConfigKey   = "config"
+
+	// pgNotifyChannel is the PostgreSQL LISTEN/NOTIFY channel used to propagate
+	// auth changes across instances sharing the same database.
+	pgNotifyChannel = "auth_changes"
+
+	// listenerReconnectMin and listenerReconnectMax define exponential backoff
+	// bounds for the LISTEN connection reconnect loop.
+	listenerReconnectMin = 1 * time.Second
+	listenerReconnectMax = 30 * time.Second
 )
 
 // PostgresStoreConfig captures configuration required to initialize a Postgres-backed store.
@@ -43,6 +57,34 @@ type PostgresStore struct {
 	configPath string
 	authDir    string
 	mu         sync.Mutex
+
+	// machineID uniquely identifies this running instance.  It is embedded in every
+	// pg_notify payload so that the listener can skip notifications originating from
+	// the local instance and avoid feedback loops.
+	machineID string
+
+	// syncInProgress is set to 1 while the store is applying remote changes to the
+	// local spool directory.  PersistAuthFiles checks this flag and short-circuits
+	// to prevent the file-watcher from pushing the same changes back to the database.
+	syncInProgress atomic.Int32
+
+	// recentRemoteSyncs tracks auth IDs that were recently written or removed by
+	// the listener.  PersistAuthFiles skips these IDs to prevent the file-watcher
+	// from pushing them back to the database after syncInProgress has been cleared.
+	recentRemoteSyncsMu sync.Mutex
+	recentRemoteSyncs   map[string]time.Time
+
+	// onRemoteChange is an optional callback invoked after the listener applies a
+	// remote change to the local spool directory.  The watcher registers this to
+	// reload affected auth entries without a full directory re-scan.
+	onRemoteChange atomic.Value // stores func(op string, authID string, path string)
+
+	// listenerMu protects listenerCancel and listenerWg from concurrent access.
+	listenerMu sync.Mutex
+	// listenerCancel stops the background LISTEN goroutine.
+	listenerCancel context.CancelFunc
+	// listenerWg tracks the background LISTEN goroutine so Close can wait for it.
+	listenerWg sync.WaitGroup
 }
 
 // NewPostgresStore establishes a connection to PostgreSQL and prepares the local workspace.
@@ -90,20 +132,23 @@ func NewPostgresStore(ctx context.Context, cfg PostgresStoreConfig) (*PostgresSt
 	}
 
 	store := &PostgresStore{
-		db:         db,
-		cfg:        cfg,
-		spoolRoot:  absSpool,
-		configPath: filepath.Join(configDir, "config.yaml"),
-		authDir:    authDir,
+		db:                db,
+		cfg:               cfg,
+		spoolRoot:         absSpool,
+		configPath:        filepath.Join(configDir, "config.yaml"),
+		authDir:           authDir,
+		machineID:         uuid.New().String(),
+		recentRemoteSyncs: make(map[string]time.Time),
 	}
 	return store, nil
 }
 
-// Close releases the underlying database connection.
+// Close releases the underlying database connection and stops the listener.
 func (s *PostgresStore) Close() error {
 	if s == nil || s.db == nil {
 		return nil
 	}
+	s.StopListener()
 	return s.db.Close()
 }
 
@@ -344,12 +389,19 @@ func (s *PostgresStore) Delete(ctx context.Context, id string) error {
 }
 
 // PersistAuthFiles stores the provided auth file changes in PostgreSQL.
+// It short-circuits when a remote sync is in progress to avoid feedback loops.
 func (s *PostgresStore) PersistAuthFiles(ctx context.Context, _ string, paths ...string) error {
 	if len(paths) == 0 {
 		return nil
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	// Check under lock to avoid TOCTOU race with applySingleRemoteChange.
+	if s.syncInProgress.Load() != 0 {
+		log.Debug("postgres store: skipping PersistAuthFiles during remote sync")
+		return nil
+	}
 
 	for _, p := range paths {
 		trimmed := strings.TrimSpace(p)
@@ -369,6 +421,13 @@ func (s *PostgresStore) PersistAuthFiles(ctx context.Context, _ string, paths ..
 				continue
 			}
 			trimmed = abs
+		}
+		// Skip files that were recently written by the remote sync listener.
+		// This prevents the file-watcher from pushing them back to the database
+		// after syncInProgress has been cleared.
+		if s.isRecentRemoteSync(relID) {
+			log.Debugf("postgres store: skipping recently synced auth %s", relID)
+			continue
 		}
 		if err = s.syncAuthFile(ctx, relID, trimmed); err != nil {
 			return err
@@ -512,6 +571,7 @@ func (s *PostgresStore) persistAuth(ctx context.Context, relID string, data []by
 	if _, err := s.db.ExecContext(ctx, query, relID, jsonPayload); err != nil {
 		return fmt.Errorf("postgres store: upsert auth record: %w", err)
 	}
+	s.notifyChange(ctx, "upsert", relID)
 	return nil
 }
 
@@ -520,6 +580,7 @@ func (s *PostgresStore) deleteAuthRecord(ctx context.Context, relID string) erro
 	if _, err := s.db.ExecContext(ctx, query, relID); err != nil {
 		return fmt.Errorf("postgres store: delete auth record: %w", err)
 	}
+	s.notifyChange(ctx, "delete", relID)
 	return nil
 }
 
@@ -618,6 +679,344 @@ func (s *PostgresStore) fullTableName(name string) string {
 		return quoteIdentifier(name)
 	}
 	return quoteIdentifier(s.cfg.Schema) + "." + quoteIdentifier(name)
+}
+
+// ---------------------------------------------------------------------------
+// Remote change notification
+// ---------------------------------------------------------------------------
+
+// notifyPayload is the JSON structure sent via pg_notify.
+type notifyPayload struct {
+	Op     string `json:"op"`
+	ID     string `json:"id"`
+	Origin string `json:"origin"`
+}
+
+// notifyChange sends a pg_notify on the auth_changes channel.  The payload
+// includes the operation, affected auth ID and the local machineID so that
+// the listener on the same instance can skip self-originated notifications.
+func (s *PostgresStore) notifyChange(ctx context.Context, op, relID string) {
+	payload := notifyPayload{Op: op, ID: relID, Origin: s.machineID}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		log.Errorf("postgres store: marshal notify payload: %v", err)
+		return
+	}
+	if _, err = s.db.ExecContext(ctx, "SELECT pg_notify($1, $2)", pgNotifyChannel, string(raw)); err != nil {
+		log.Errorf("postgres store: pg_notify: %v", err)
+	}
+}
+
+// OnRemoteChange registers a callback that is invoked whenever the listener
+// applies a remote change to the local spool directory.
+// Must be called before StartListener; it is not safe to call concurrently.
+func (s *PostgresStore) OnRemoteChange(fn func(op string, authID string, path string)) {
+	s.onRemoteChange.Store(fn)
+}
+
+// getRemoteChangeCallback safely loads the registered callback.
+func (s *PostgresStore) getRemoteChangeCallback() func(string, string, string) {
+	if v := s.onRemoteChange.Load(); v != nil {
+		if fn, ok := v.(func(string, string, string)); ok {
+			return fn
+		}
+	}
+	return nil
+}
+
+const recentSyncTTL = 5 * time.Second
+
+// markRecentRemoteSync records that an auth ID was just written/removed by the
+// listener.  PersistAuthFiles will skip this ID for recentSyncTTL.
+func (s *PostgresStore) markRecentRemoteSync(relID string) {
+	s.recentRemoteSyncsMu.Lock()
+	s.recentRemoteSyncs[relID] = time.Now()
+	s.recentRemoteSyncsMu.Unlock()
+}
+
+// isRecentRemoteSync returns true if the given auth ID was synced from a remote
+// instance within the last recentSyncTTL.
+func (s *PostgresStore) isRecentRemoteSync(relID string) bool {
+	s.recentRemoteSyncsMu.Lock()
+	t, ok := s.recentRemoteSyncs[relID]
+	if ok && time.Since(t) > recentSyncTTL {
+		delete(s.recentRemoteSyncs, relID)
+		ok = false
+	}
+	s.recentRemoteSyncsMu.Unlock()
+	return ok
+}
+
+// ---------------------------------------------------------------------------
+// Incremental sync  (safe to call while the watcher is running)
+// ---------------------------------------------------------------------------
+
+// incrementalSyncAuth synchronizes the local auth directory with the database
+// without wiping the directory.  It compares database records against local
+// files and only adds, updates or removes the differences.
+func (s *PostgresStore) incrementalSyncAuth(ctx context.Context) error {
+	query := fmt.Sprintf("SELECT id, content FROM %s", s.fullTableName(s.cfg.AuthTable))
+	rows, err := s.db.QueryContext(ctx, query)
+	if err != nil {
+		return fmt.Errorf("postgres store: incremental sync query: %w", err)
+	}
+	defer rows.Close()
+
+	// Collect all DB records keyed by relative ID.
+	dbRecords := make(map[string]string, 32)
+	for rows.Next() {
+		var id, payload string
+		if err = rows.Scan(&id, &payload); err != nil {
+			return fmt.Errorf("postgres store: incremental sync scan: %w", err)
+		}
+		dbRecords[id] = payload
+	}
+	if err = rows.Err(); err != nil {
+		return fmt.Errorf("postgres store: incremental sync rows: %w", err)
+	}
+
+	s.syncInProgress.Store(1)
+	defer s.syncInProgress.Store(0)
+
+	// Upsert: write or update local files that differ from DB content.
+	for id, payload := range dbRecords {
+		path, errPath := s.absoluteAuthPath(id)
+		if errPath != nil {
+			log.WithError(errPath).Warnf("postgres store: incremental sync skipping %s", id)
+			continue
+		}
+		if err = os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			return fmt.Errorf("postgres store: incremental sync mkdir: %w", err)
+		}
+		existing, errRead := os.ReadFile(path)
+		if errRead == nil && fileContentHash(existing) == fileContentHash([]byte(payload)) {
+			continue // already up to date
+		}
+		if err = os.WriteFile(path, []byte(payload), 0o600); err != nil {
+			return fmt.Errorf("postgres store: incremental sync write %s: %w", id, err)
+		}
+		s.markRecentRemoteSync(id)
+		if cb := s.getRemoteChangeCallback(); cb != nil {
+			cb("upsert", id, path)
+		}
+	}
+
+	// Delete: remove local files whose IDs no longer exist in the database.
+	err = filepath.WalkDir(s.authDir, func(path string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil || d.IsDir() {
+			return walkErr
+		}
+		relID, relErr := s.relativeAuthID(path)
+		if relErr != nil {
+			return nil // skip files outside managed directory
+		}
+		if _, exists := dbRecords[relID]; exists {
+			return nil
+		}
+		if removeErr := os.Remove(path); removeErr != nil && !errors.Is(removeErr, fs.ErrNotExist) {
+			log.Errorf("postgres store: incremental sync remove %s: %v", relID, removeErr)
+			return nil
+		}
+		s.markRecentRemoteSync(relID)
+		if cb := s.getRemoteChangeCallback(); cb != nil {
+			cb("delete", relID, path)
+		}
+		return nil
+	})
+	if err != nil {
+		return fmt.Errorf("postgres store: incremental sync walk: %w", err)
+	}
+
+	return nil
+}
+
+// applySingleRemoteChange handles a single notification from another instance.
+func (s *PostgresStore) applySingleRemoteChange(ctx context.Context, payload notifyPayload) {
+	s.syncInProgress.Store(1)
+	defer s.syncInProgress.Store(0)
+
+	switch payload.Op {
+	case "delete":
+		s.removeLocalAuthFile(payload.ID)
+
+	case "upsert":
+		query := fmt.Sprintf("SELECT content FROM %s WHERE id = $1", s.fullTableName(s.cfg.AuthTable))
+		var content string
+		if err := s.db.QueryRowContext(ctx, query, payload.ID).Scan(&content); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				// Record was deleted between notify and our query; treat as delete.
+				s.removeLocalAuthFile(payload.ID)
+				return
+			}
+			log.Errorf("postgres store: remote upsert fetch %s: %v", payload.ID, err)
+			return
+		}
+		path, err := s.absoluteAuthPath(payload.ID)
+		if err != nil {
+			log.WithError(err).Warnf("postgres store: remote upsert resolve path %s", payload.ID)
+			return
+		}
+		if err = os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			log.Errorf("postgres store: remote upsert mkdir %s: %v", payload.ID, err)
+			return
+		}
+		if err = os.WriteFile(path, []byte(content), 0o600); err != nil {
+			log.Errorf("postgres store: remote upsert write %s: %v", payload.ID, err)
+			return
+		}
+		s.markRecentRemoteSync(payload.ID)
+		log.Infof("postgres store: applied remote upsert for %s", payload.ID)
+		if cb := s.getRemoteChangeCallback(); cb != nil {
+			cb("upsert", payload.ID, path)
+		}
+
+	default:
+		log.Warnf("postgres store: unknown remote op %q for %s", payload.Op, payload.ID)
+	}
+}
+
+// removeLocalAuthFile deletes a single auth file from the local spool directory.
+func (s *PostgresStore) removeLocalAuthFile(authID string) {
+	path, err := s.absoluteAuthPath(authID)
+	if err != nil {
+		log.WithError(err).Warnf("postgres store: remote delete resolve path %s", authID)
+		return
+	}
+	if err = os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		log.Errorf("postgres store: remote delete file %s: %v", authID, err)
+		return
+	}
+	s.markRecentRemoteSync(authID)
+	log.Infof("postgres store: applied remote delete for %s", authID)
+	if cb := s.getRemoteChangeCallback(); cb != nil {
+		cb("delete", authID, path)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Background LISTEN goroutine
+// ---------------------------------------------------------------------------
+
+// StartListener launches a background goroutine that uses a dedicated pgx
+// connection to LISTEN for auth_changes notifications.  On disconnect it
+// reconnects with exponential backoff and runs an incremental sync to catch
+// up on any notifications missed during the outage.
+func (s *PostgresStore) StartListener(ctx context.Context) {
+	s.listenerMu.Lock()
+	defer s.listenerMu.Unlock()
+
+	// Stop any existing listener to prevent goroutine leaks.
+	if s.listenerCancel != nil {
+		s.listenerCancel()
+		s.listenerWg.Wait()
+	}
+
+	ctx, cancel := context.WithCancel(ctx)
+	s.listenerCancel = cancel
+
+	s.listenerWg.Add(1)
+	go s.listenLoop(ctx)
+	log.Infof("postgres store: LISTEN/NOTIFY listener started (machine=%s)", s.machineID)
+}
+
+// StopListener stops the background LISTEN goroutine and waits for it to exit.
+func (s *PostgresStore) StopListener() {
+	s.listenerMu.Lock()
+	defer s.listenerMu.Unlock()
+
+	if s.listenerCancel != nil {
+		s.listenerCancel()
+		s.listenerCancel = nil
+	}
+	s.listenerWg.Wait()
+}
+
+func (s *PostgresStore) listenLoop(ctx context.Context) {
+	defer s.listenerWg.Done()
+	backoff := listenerReconnectMin
+
+	for {
+		if ctx.Err() != nil {
+			return
+		}
+
+		connectCtx, connectCancel := context.WithTimeout(ctx, 10*time.Second)
+		conn, err := pgx.Connect(connectCtx, s.cfg.DSN)
+		connectCancel()
+		if err != nil {
+			log.Errorf("postgres store: listener connect: %v (retry in %v)", err, backoff)
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(backoff):
+			}
+			backoff = minDuration(backoff*2, listenerReconnectMax)
+			continue
+		}
+
+		if _, err = conn.Exec(ctx, fmt.Sprintf("LISTEN %s", pgNotifyChannel)); err != nil {
+			log.Errorf("postgres store: LISTEN: %v", err)
+			_ = conn.Close(ctx)
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(backoff):
+			}
+			backoff = minDuration(backoff*2, listenerReconnectMax)
+			continue
+		}
+
+		// Connection established — reset backoff and run incremental sync to
+		// catch any changes that occurred while disconnected.
+		backoff = listenerReconnectMin
+		if err = s.incrementalSyncAuth(ctx); err != nil {
+			log.Errorf("postgres store: incremental sync after reconnect: %v", err)
+		}
+
+		// Block waiting for notifications until the connection is lost.
+		s.waitForNotifications(ctx, conn)
+		_ = conn.Close(ctx)
+	}
+}
+
+func (s *PostgresStore) waitForNotifications(ctx context.Context, conn *pgx.Conn) {
+	for {
+		notification, err := conn.WaitForNotification(ctx)
+		if err != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			log.Errorf("postgres store: wait for notification: %v", err)
+			return // will trigger reconnect in listenLoop
+		}
+
+		var payload notifyPayload
+		if err = json.Unmarshal([]byte(notification.Payload), &payload); err != nil {
+			log.Warnf("postgres store: invalid notification payload: %v", err)
+			continue
+		}
+
+		// Skip notifications originating from this instance.
+		if payload.Origin == s.machineID {
+			continue
+		}
+
+		log.Debugf("postgres store: received remote %s for %s from %s", payload.Op, payload.ID, payload.Origin)
+		s.applySingleRemoteChange(ctx, payload)
+	}
+}
+
+// fileContentHash returns the hex-encoded SHA-256 of data.
+func fileContentHash(data []byte) string {
+	h := sha256.Sum256(data)
+	return hex.EncodeToString(h[:])
+}
+
+func minDuration(a, b time.Duration) time.Duration {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 func quoteIdentifier(identifier string) string {
