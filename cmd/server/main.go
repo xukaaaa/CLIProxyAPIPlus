@@ -32,6 +32,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/store"
 	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/translator"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/tui"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/usage"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
@@ -152,8 +153,10 @@ func main() {
 		usePostgresStore     bool
 		pgStoreDSN           string
 		pgStoreSchema        string
+		pgUsageTable         string
 		pgStoreLocalPath     string
 		pgStoreInst          *store.PostgresStore
+		pgUsageStoreInst     *usage.PostgresUsageStore
 		useGitStore          bool
 		gitStoreRemoteURL    string
 		gitStoreUser         string
@@ -212,6 +215,12 @@ func main() {
 		}
 		if value, ok := lookupEnv("PGSTORE_LOCAL_PATH", "pgstore_local_path"); ok {
 			pgStoreLocalPath = value
+		}
+		if value, ok := lookupEnv("PGSTORE_USAGE_TABLE", "pgstore_usage_table"); ok {
+			pgUsageTable = value
+		}
+		if strings.TrimSpace(pgUsageTable) == "" {
+			pgUsageTable = "usage_request_events"
 		}
 		if pgStoreLocalPath == "" {
 			if writableBase != "" {
@@ -343,6 +352,32 @@ func main() {
 			cfg.AuthDir = pgStoreInst.AuthDir()
 			log.Infof("postgres-backed token store enabled, workspace path: %s", pgStoreInst.WorkDir())
 		}
+		pgStoreInst.StartListener(context.Background())
+		ctx, cancel = context.WithTimeout(context.Background(), 30*time.Second)
+		pgUsageStoreInst, err = usage.NewPostgresUsageStore(ctx, usage.PostgresUsageStoreConfig{
+			DSN:       pgStoreDSN,
+			Schema:    pgStoreSchema,
+			TableName: pgUsageTable,
+		})
+		cancel()
+		if err != nil {
+			log.Errorf("failed to initialize postgres usage store: %v", err)
+			return
+		}
+		ctx, cancel = context.WithTimeout(context.Background(), 30*time.Second)
+		if errEnsureUsage := pgUsageStoreInst.EnsureSchema(ctx); errEnsureUsage != nil {
+			cancel()
+			log.Errorf("failed to ensure postgres usage schema: %v", errEnsureUsage)
+			return
+		}
+		cancel()
+		defer func() {
+			if errClose := pgUsageStoreInst.Close(); errClose != nil {
+				log.Errorf("failed to close postgres usage store: %v", errClose)
+			}
+		}()
+		usage.SetStatisticsBackend(pgUsageStoreInst)
+		log.Infof("postgres-backed usage store enabled, table: %s", pgUsageTable)
 	} else if useObjectStore {
 		if objectStoreLocalPath == "" {
 			if writableBase != "" {
@@ -499,6 +534,7 @@ func main() {
 		}
 	}
 	redisqueue.SetUsageStatisticsEnabled(cfg.UsageStatisticsEnabled)
+	usage.SetStatisticsEnabled(cfg.UsageStatisticsEnabled)
 	redisqueue.SetRetentionSeconds(cfg.RedisUsageQueueRetentionSeconds)
 	coreauth.SetQuotaCooldownDisabled(cfg.DisableCooling)
 	coreauth.SetTransientErrorCooldownSeconds(cfg.TransientErrorCooldownSeconds)

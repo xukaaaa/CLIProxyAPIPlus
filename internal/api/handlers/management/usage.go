@@ -9,6 +9,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/redisqueue"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/usage"
 )
 
 type usageQueueRecord []byte
@@ -40,6 +41,30 @@ func (h *Handler) GetUsageQueue(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, records)
+}
+
+// GetUsageStatistics returns the durable usage statistics snapshot.
+func (h *Handler) GetUsageStatistics(c *gin.Context) {
+	backend := usage.GetStatisticsBackend()
+	if backend == nil {
+		c.JSON(http.StatusOK, gin.H{
+			"usage":           usage.StatisticsSnapshot{APIs: map[string]usage.APISnapshot{}},
+			"failed_requests": 0,
+		})
+		return
+	}
+	snapshot, err := backend.Snapshot(c.Request.Context())
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load usage statistics"})
+		return
+	}
+	if snapshot.APIs == nil {
+		snapshot.APIs = map[string]usage.APISnapshot{}
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"usage":           snapshot,
+		"failed_requests": snapshot.FailureCount,
+	})
 }
 
 func parseUsageQueueCount(value string) (int, error) {
