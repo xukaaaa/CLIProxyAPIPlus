@@ -171,6 +171,7 @@ type Manager struct {
 	scheduler *authScheduler
 	// pluginScheduler runs outside m.mu before falling back to native selection.
 	pluginScheduler PluginScheduler
+	persistQ        *authPersistQueue
 	// homeRuntimeAuths caches auths returned by Home so websocket sessions can
 	// reuse an established upstream credential without dispatching every turn.
 	homeRuntimeAuths map[string]map[string]*Auth
@@ -224,6 +225,7 @@ func NewManager(store Store, selector Selector, hook Hook) *Manager {
 		providerOffsets:  make(map[string]int),
 		modelPoolOffsets: make(map[string]int),
 	}
+	manager.persistQ = newAuthPersistQueue(manager)
 	// atomic.Value requires non-nil initial value.
 	manager.runtimeConfig.Store(&internalconfig.Config{})
 	manager.apiKeyModelAlias.Store(apiKeyModelAliasTable(nil))
@@ -351,6 +353,7 @@ func (m *Manager) ReconcileRegistryModelStates(ctx context.Context, authID strin
 	}
 
 	var snapshot *Auth
+	var persistSnapshot *Auth
 	now := time.Now()
 
 	m.mu.Lock()
@@ -390,16 +393,17 @@ func (m *Manager) ReconcileRegistryModelStates(ctx context.Context, authID strin
 				auth.Status = StatusActive
 			}
 			auth.UpdatedAt = now
-			if errPersist := m.persist(ctx, auth); errPersist != nil {
-				logEntryWithRequestID(ctx).WithField("auth_id", auth.ID).Warnf("failed to persist auth changes during model state reconciliation: %v", errPersist)
-			}
 			snapshot = auth.Clone()
+			persistSnapshot = auth.Clone()
 		}
 	}
 	m.mu.Unlock()
 
 	if m.scheduler != nil && snapshot != nil {
 		m.scheduler.upsertAuth(snapshot)
+	}
+	if persistSnapshot != nil {
+		m.persistAsync(ctx, persistSnapshot, "failed to persist auth changes during model state reconciliation")
 	}
 }
 
@@ -1430,11 +1434,41 @@ func (m *Manager) Update(ctx context.Context, auth *Auth) (*Auth, error) {
 	if auth == nil || auth.ID == "" {
 		return nil, nil
 	}
+	authClone := m.upsertInMemory(auth)
+	if authClone == nil {
+		return nil, nil
+	}
+	m.rebuildAPIKeyModelAliasFromRuntimeConfig()
+	if m.scheduler != nil {
+		m.scheduler.upsertAuth(authClone)
+	}
+	_ = m.persist(ctx, auth)
+	m.hook.OnAuthUpdated(ctx, auth.Clone())
+	return auth.Clone(), nil
+}
+
+// UpdateInMemory replaces an existing auth entry without persisting it to the backing store.
+func (m *Manager) UpdateInMemory(auth *Auth) *Auth {
+	if auth == nil || auth.ID == "" {
+		return nil
+	}
+	authClone := m.upsertInMemory(auth)
+	if authClone == nil {
+		return nil
+	}
+	m.rebuildAPIKeyModelAliasFromRuntimeConfig()
+	if m.scheduler != nil {
+		m.scheduler.upsertAuth(authClone)
+	}
+	return authClone.Clone()
+}
+
+func (m *Manager) upsertInMemory(auth *Auth) *Auth {
 	m.mu.Lock()
+	defer m.mu.Unlock()
 	existing, ok := m.auths[auth.ID]
 	if !ok || existing == nil {
-		m.mu.Unlock()
-		return nil, nil
+		return nil
 	}
 	if !auth.indexAssigned && auth.Index == "" {
 		auth.Index = existing.Index
@@ -1451,15 +1485,7 @@ func (m *Manager) Update(ctx context.Context, auth *Auth) (*Auth, error) {
 	auth.EnsureIndex()
 	authClone := auth.Clone()
 	m.auths[auth.ID] = authClone
-	m.mu.Unlock()
-	m.rebuildAPIKeyModelAliasFromRuntimeConfig()
-	if m.scheduler != nil {
-		m.scheduler.upsertAuth(authClone)
-	}
-	m.queueRefreshReschedule(auth.ID)
-	_ = m.persist(ctx, auth)
-	m.hook.OnAuthUpdated(ctx, auth.Clone())
-	return auth.Clone(), nil
+	return authClone
 }
 
 // Remove deletes an auth from runtime state without persisting.
@@ -1996,6 +2022,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			execCtx = context.WithValue(execCtx, roundTripperContextKey{}, rt)
 			execCtx = context.WithValue(execCtx, "cliproxy.roundtripper", rt)
 		}
+		execCtx = contextWithRequestedModelAlias(execCtx, opts, routeModel)
 		models, pooled := m.preparedExecutionModels(auth, routeModel)
 		if len(models) == 0 {
 			continue
@@ -2733,6 +2760,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 	clearModelQuota := false
 	setModelQuota := false
 	var authSnapshot *Auth
+	var persistSnapshot *Auth
 
 	m.mu.Lock()
 	if auth, ok := m.auths[result.AuthID]; ok && auth != nil {
@@ -2870,8 +2898,8 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 			}
 		}
 
-		_ = m.persist(ctx, auth)
 		authSnapshot = auth.Clone()
+		persistSnapshot = auth.Clone()
 	}
 	m.mu.Unlock()
 	if m.scheduler != nil && authSnapshot != nil {
@@ -2892,6 +2920,9 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 
 	m.hook.OnResult(ctx, result)
 	m.publishErrorEvent(result, authSnapshot)
+	if persistSnapshot != nil {
+		m.persistAsync(ctx, persistSnapshot, "failed to persist auth result state")
+	}
 }
 
 func ensureModelState(auth *Auth, model string) *ModelState {
@@ -4421,7 +4452,22 @@ func antigravityCreditsKVUnavailableError(cause error) error {
 }
 
 func (m *Manager) persist(ctx context.Context, auth *Auth) error {
-	if m.store == nil || auth == nil {
+	if m != nil && auth != nil {
+		if err := m.authPersistQueue().drainAuth(ctx, auth.ID); err != nil {
+			return err
+		}
+	}
+	return m.persistDirect(ctx, auth)
+}
+
+func (m *Manager) persistDirect(ctx context.Context, auth *Auth) error {
+	if m == nil || auth == nil {
+		return nil
+	}
+	m.mu.RLock()
+	store := m.store
+	m.mu.RUnlock()
+	if store == nil {
 		return nil
 	}
 	if shouldSkipPersist(ctx) {
@@ -4439,8 +4485,51 @@ func (m *Manager) persist(ctx context.Context, auth *Auth) error {
 	if auth.Metadata == nil {
 		return nil
 	}
-	_, err := m.store.Save(ctx, auth)
+	_, err := store.Save(ctx, auth)
 	return err
+}
+
+func (m *Manager) persistAsync(ctx context.Context, auth *Auth, failureMessage string) {
+	if m == nil || auth == nil {
+		return
+	}
+	if shouldSkipPersist(ctx) {
+		return
+	}
+	m.authPersistQueue().enqueue(ctx, auth, failureMessage)
+}
+
+func (m *Manager) authPersistQueue() *authPersistQueue {
+	if m == nil {
+		return nil
+	}
+	m.mu.RLock()
+	queue := m.persistQ
+	m.mu.RUnlock()
+	if queue != nil {
+		return queue
+	}
+	m.mu.Lock()
+	if m.persistQ == nil {
+		m.persistQ = newAuthPersistQueue(m)
+	}
+	queue = m.persistQ
+	m.mu.Unlock()
+	return queue
+}
+
+// FlushPersistence waits until queued runtime auth state has been persisted.
+func (m *Manager) FlushPersistence(ctx context.Context) error {
+	if m == nil {
+		return nil
+	}
+	m.mu.RLock()
+	queue := m.persistQ
+	m.mu.RUnlock()
+	if queue == nil {
+		return nil
+	}
+	return queue.flush(ctx)
 }
 
 // StartAutoRefresh launches a background loop that evaluates auth freshness
