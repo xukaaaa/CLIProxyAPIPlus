@@ -127,3 +127,76 @@ func TestDeleteAuthFile_FallbackToAuthDirPath(t *testing.T) {
 		t.Fatalf("expected auth file to be removed from auth dir, stat err: %v", errStat)
 	}
 }
+
+func TestDeleteAuthFile_DoesNotPersistDisabledAuthBackToStore(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+	gin.SetMode(gin.TestMode)
+
+	authDir := t.TempDir()
+	fileName := "codex-user@example.com-free.json"
+	filePath := filepath.Join(authDir, fileName)
+	if errWrite := os.WriteFile(filePath, []byte(`{"type":"codex","email":"user@example.com"}`), 0o600); errWrite != nil {
+		t.Fatalf("failed to write auth file: %v", errWrite)
+	}
+
+	store := &memoryAuthStore{items: make(map[string]*coreauth.Auth)}
+	manager := coreauth.NewManager(store, nil, nil)
+	record := &coreauth.Auth{
+		ID:       fileName,
+		FileName: fileName,
+		Provider: "codex",
+		Attributes: map[string]string{
+			"path": filePath,
+		},
+		Metadata: map[string]any{
+			"type":  "codex",
+			"email": "user@example.com",
+		},
+	}
+	if _, errRegister := manager.Register(context.Background(), record); errRegister != nil {
+		t.Fatalf("failed to register auth record: %v", errRegister)
+	}
+	if _, exists := store.items[fileName]; !exists {
+		t.Fatalf("expected auth record to be stored before delete")
+	}
+
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: authDir}, manager)
+	h.tokenStore = store
+
+	deleteRec := httptest.NewRecorder()
+	deleteCtx, _ := gin.CreateTestContext(deleteRec)
+	deleteReq := httptest.NewRequest(http.MethodDelete, "/v0/management/auth-files?name="+url.QueryEscape(fileName), nil)
+	deleteCtx.Request = deleteReq
+	h.DeleteAuthFile(deleteCtx)
+
+	if deleteRec.Code != http.StatusOK {
+		t.Fatalf("expected delete status %d, got %d with body %s", http.StatusOK, deleteRec.Code, deleteRec.Body.String())
+	}
+	if _, errStat := os.Stat(filePath); !os.IsNotExist(errStat) {
+		t.Fatalf("expected auth file to be removed from auth dir, stat err: %v", errStat)
+	}
+	if _, exists := store.items[fileName]; exists {
+		t.Fatalf("expected auth record to stay deleted from store")
+	}
+
+	listRec := httptest.NewRecorder()
+	listCtx, _ := gin.CreateTestContext(listRec)
+	listReq := httptest.NewRequest(http.MethodGet, "/v0/management/auth-files", nil)
+	listCtx.Request = listReq
+	h.ListAuthFiles(listCtx)
+
+	if listRec.Code != http.StatusOK {
+		t.Fatalf("expected list status %d, got %d with body %s", http.StatusOK, listRec.Code, listRec.Body.String())
+	}
+	var listPayload map[string]any
+	if errUnmarshal := json.Unmarshal(listRec.Body.Bytes(), &listPayload); errUnmarshal != nil {
+		t.Fatalf("failed to decode list payload: %v", errUnmarshal)
+	}
+	filesRaw, ok := listPayload["files"].([]any)
+	if !ok {
+		t.Fatalf("expected files array, payload: %#v", listPayload)
+	}
+	if len(filesRaw) != 0 {
+		t.Fatalf("expected deleted auth to be hidden from list, got %d entries", len(filesRaw))
+	}
+}
