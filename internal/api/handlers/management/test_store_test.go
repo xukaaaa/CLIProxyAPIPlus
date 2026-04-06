@@ -2,14 +2,16 @@ package management
 
 import (
 	"context"
+	"path/filepath"
 	"sync"
 
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 )
 
 type memoryAuthStore struct {
-	mu    sync.Mutex
-	items map[string]*coreauth.Auth
+	mu      sync.Mutex
+	items   map[string]*coreauth.Auth
+	baseDir string
 }
 
 func (s *memoryAuthStore) List(_ context.Context) ([]*coreauth.Auth, error) {
@@ -43,7 +45,14 @@ func (s *memoryAuthStore) Delete(_ context.Context, id string) error {
 	defer s.mu.Unlock()
 
 	delete(s.items, id)
+	if s.baseDir != "" {
+		if rel, err := filepath.Rel(s.baseDir, id); err == nil && rel != "" && rel != "." {
+			delete(s.items, filepath.ToSlash(rel))
+			delete(s.items, rel)
+		}
+	}
+	delete(s.items, filepath.Base(id))
 	return nil
 }
 
-func (s *memoryAuthStore) SetBaseDir(string) {}
+func (s *memoryAuthStore) SetBaseDir(dir string) { s.baseDir = dir }
