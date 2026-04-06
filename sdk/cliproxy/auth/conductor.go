@@ -1153,7 +1153,32 @@ func (m *Manager) Update(ctx context.Context, auth *Auth) (*Auth, error) {
 	if auth == nil || auth.ID == "" {
 		return nil, nil
 	}
+	authClone := m.upsertInMemory(auth)
+	m.rebuildAPIKeyModelAliasFromRuntimeConfig()
+	if m.scheduler != nil {
+		m.scheduler.upsertAuth(authClone)
+	}
+	_ = m.persist(ctx, auth)
+	m.hook.OnAuthUpdated(ctx, auth.Clone())
+	return auth.Clone(), nil
+}
+
+// UpdateInMemory replaces an existing auth entry without persisting it to the backing store.
+func (m *Manager) UpdateInMemory(auth *Auth) *Auth {
+	if auth == nil || auth.ID == "" {
+		return nil
+	}
+	authClone := m.upsertInMemory(auth)
+	m.rebuildAPIKeyModelAliasFromRuntimeConfig()
+	if m.scheduler != nil {
+		m.scheduler.upsertAuth(authClone)
+	}
+	return authClone.Clone()
+}
+
+func (m *Manager) upsertInMemory(auth *Auth) *Auth {
 	m.mu.Lock()
+	defer m.mu.Unlock()
 	if existing, ok := m.auths[auth.ID]; ok && existing != nil {
 		if !auth.indexAssigned && auth.Index == "" {
 			auth.Index = existing.Index
@@ -1171,15 +1196,7 @@ func (m *Manager) Update(ctx context.Context, auth *Auth) (*Auth, error) {
 	auth.EnsureIndex()
 	authClone := auth.Clone()
 	m.auths[auth.ID] = authClone
-	m.mu.Unlock()
-	m.rebuildAPIKeyModelAliasFromRuntimeConfig()
-	if m.scheduler != nil {
-		m.scheduler.upsertAuth(authClone)
-	}
-	m.queueRefreshReschedule(auth.ID)
-	_ = m.persist(ctx, auth)
-	m.hook.OnAuthUpdated(ctx, auth.Clone())
-	return auth.Clone(), nil
+	return authClone
 }
 
 // Load resets manager state from the backing store.

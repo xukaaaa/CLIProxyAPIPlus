@@ -1345,7 +1345,7 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"status": "ok"})
 }
 
-func (h *Handler) disableAuth(ctx context.Context, id string) {
+func (h *Handler) disableAuth(_ context.Context, id string) {
 	if h == nil || h.authManager == nil {
 		return
 	}
@@ -1353,12 +1353,18 @@ func (h *Handler) disableAuth(ctx context.Context, id string) {
 	if id == "" {
 		return
 	}
-	if auth, ok := h.authManager.GetByID(id); ok {
+	markDisabled := func(auth *coreauth.Auth) {
+		if auth == nil {
+			return
+		}
 		auth.Disabled = true
 		auth.Status = coreauth.StatusDisabled
 		auth.StatusMessage = "removed via management API"
 		auth.UpdatedAt = time.Now()
-		_, _ = h.authManager.Update(ctx, auth)
+		h.authManager.UpdateInMemory(auth)
+	}
+	if auth, ok := h.authManager.GetByID(id); ok {
+		markDisabled(auth)
 		return
 	}
 	authID := h.authIDForPath(id)
@@ -1366,11 +1372,7 @@ func (h *Handler) disableAuth(ctx context.Context, id string) {
 		return
 	}
 	if auth, ok := h.authManager.GetByID(authID); ok {
-		auth.Disabled = true
-		auth.Status = coreauth.StatusDisabled
-		auth.StatusMessage = "removed via management API"
-		auth.UpdatedAt = time.Now()
-		_, _ = h.authManager.Update(ctx, auth)
+		markDisabled(auth)
 	}
 }
 
