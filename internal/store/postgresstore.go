@@ -244,12 +244,6 @@ func (s *PostgresStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (stri
 		return "", fmt.Errorf("postgres store: missing file path attribute for %s", auth.ID)
 	}
 
-	if auth.Disabled {
-		if _, statErr := os.Stat(path); errors.Is(statErr, fs.ErrNotExist) {
-			return "", nil
-		}
-	}
-
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -257,12 +251,27 @@ func (s *PostgresStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (stri
 		return "", fmt.Errorf("postgres store: create auth directory: %w", err)
 	}
 
+	type metadataSetter interface {
+		SetMetadata(map[string]any)
+	}
+
 	switch {
 	case auth.Storage != nil:
+		if auth.Metadata == nil {
+			auth.Metadata = make(map[string]any)
+		}
+		auth.Metadata["disabled"] = auth.Disabled
+		if setter, ok := auth.Storage.(metadataSetter); ok {
+			setter.SetMetadata(auth.Metadata)
+		}
 		if err = auth.Storage.SaveTokenToFile(path); err != nil {
 			return "", err
 		}
+		if err = persistDisabledFlag(path, auth.Disabled); err != nil {
+			return "", err
+		}
 	case auth.Metadata != nil:
+		auth.Metadata["disabled"] = auth.Disabled
 		raw, errMarshal := json.Marshal(auth.Metadata)
 		if errMarshal != nil {
 			return "", fmt.Errorf("postgres store: marshal metadata: %w", errMarshal)
@@ -342,12 +351,18 @@ func (s *PostgresStore) List(ctx context.Context) ([]*cliproxyauth.Auth, error) 
 		if email := strings.TrimSpace(valueAsString(metadata["email"])); email != "" {
 			attr["email"] = email
 		}
+		disabled, _ := metadata["disabled"].(bool)
+		status := cliproxyauth.StatusActive
+		if disabled {
+			status = cliproxyauth.StatusDisabled
+		}
 		auth := &cliproxyauth.Auth{
 			ID:               normalizeAuthID(id),
 			Provider:         provider,
 			FileName:         normalizeAuthID(id),
 			Label:            labelFor(metadata),
-			Status:           cliproxyauth.StatusActive,
+			Status:           status,
+			Disabled:         disabled,
 			Attributes:       attr,
 			Metadata:         metadata,
 			CreatedAt:        createdAt,
@@ -1033,6 +1048,26 @@ func valueAsString(v any) string {
 	default:
 		return ""
 	}
+}
+
+func persistDisabledFlag(path string, disabled bool) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("postgres store: read auth file for disabled flag: %w", err)
+	}
+	payload := make(map[string]any)
+	if err = json.Unmarshal(data, &payload); err != nil {
+		return fmt.Errorf("postgres store: unmarshal auth file for disabled flag: %w", err)
+	}
+	payload["disabled"] = disabled
+	normalized, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("postgres store: marshal auth file with disabled flag: %w", err)
+	}
+	if err = os.WriteFile(path, normalized, 0o600); err != nil {
+		return fmt.Errorf("postgres store: write auth file with disabled flag: %w", err)
+	}
+	return nil
 }
 
 func labelFor(metadata map[string]any) string {
