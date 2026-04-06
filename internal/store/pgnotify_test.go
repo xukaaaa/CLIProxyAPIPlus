@@ -11,6 +11,9 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/codebuddy"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/codex"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 )
 
 // TestListenNotifyIntegration verifies LISTEN/NOTIFY end-to-end against a real
@@ -51,6 +54,10 @@ func TestListenNotifyIntegration(t *testing.T) {
 		testUpdateContent(t, ctx, storeA, storeB)
 	})
 
+	t.Run("DisabledContentSyncsAtoB", func(t *testing.T) {
+		testDisabledContentSyncsAtoB(t, ctx, storeA, storeB)
+	})
+
 	t.Run("DeleteAtoB", func(t *testing.T) {
 		testDeleteAtoB(t, ctx, storeA, storeB)
 	})
@@ -78,6 +85,104 @@ func TestListenNotifyIntegration(t *testing.T) {
 	t.Run("DelayedWatcherAfterSyncReset", func(t *testing.T) {
 		testDelayedWatcherAfterSyncReset(t, ctx, storeA, storeB)
 	})
+}
+
+func TestPostgresStoreSaveStorageAuthPersistsDisabled(t *testing.T) {
+	dsn := os.Getenv("PGSTORE_DSN")
+	if dsn == "" {
+		t.Skip("PGSTORE_DSN not set")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	testSaveStorageAuthPersistsDisabled(t, ctx, dsn)
+}
+
+func TestPostgresStoreListRestoresDisabled(t *testing.T) {
+	dsn := os.Getenv("PGSTORE_DSN")
+	if dsn == "" {
+		t.Skip("PGSTORE_DSN not set")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	testListRestoresDisabled(t, ctx, dsn)
+}
+
+func TestPostgresStoreSaveStorageAuthWithoutMetadataSetterPersistsDisabled(t *testing.T) {
+	dsn := os.Getenv("PGSTORE_DSN")
+	if dsn == "" {
+		t.Skip("PGSTORE_DSN not set")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	tableName := fmt.Sprintf("test_auth_save_disabled_nometa_%d", time.Now().UnixNano())
+	pg, err := NewPostgresStore(ctx, PostgresStoreConfig{
+		DSN:       dsn,
+		AuthTable: tableName,
+		SpoolDir:  filepath.Join(t.TempDir(), "pgstore"),
+	})
+	if err != nil {
+		t.Fatalf("store init: %v", err)
+	}
+	defer func() {
+		pg.db.ExecContext(context.Background(), fmt.Sprintf("DROP TABLE IF EXISTS %s", pg.fullTableName(tableName)))
+		pg.Close()
+	}()
+	if err = pg.EnsureSchema(ctx); err != nil {
+		t.Fatalf("schema: %v", err)
+	}
+
+	auth := &cliproxyauth.Auth{
+		ID:       "disabled-storage-nometa.json",
+		FileName: "disabled-storage-nometa.json",
+		Provider: "codebuddy",
+		Disabled: true,
+		Status:   cliproxyauth.StatusDisabled,
+		Storage: &codebuddy.CodeBuddyTokenStorage{
+			AccessToken:  "token",
+			RefreshToken: "refresh",
+			Domain:       "example.com",
+			UserID:       "user-1",
+		},
+	}
+
+	path, err := pg.Save(ctx, auth)
+	if err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	if path == "" {
+		t.Fatal("expected saved path")
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read saved file: %v", err)
+	}
+	var filePayload map[string]any
+	if err = json.Unmarshal(data, &filePayload); err != nil {
+		t.Fatalf("unmarshal saved file: %v", err)
+	}
+	if disabled, ok := filePayload["disabled"].(bool); !ok || !disabled {
+		t.Fatalf("expected saved file disabled=true, got %v", filePayload["disabled"])
+	}
+
+	query := fmt.Sprintf("SELECT content FROM %s WHERE id = $1", pg.fullTableName(pg.cfg.AuthTable))
+	var dbPayload string
+	if err = pg.db.QueryRowContext(ctx, query, "disabled-storage-nometa.json").Scan(&dbPayload); err != nil {
+		t.Fatalf("query db content: %v", err)
+	}
+	var dbJSON map[string]any
+	if err = json.Unmarshal([]byte(dbPayload), &dbJSON); err != nil {
+		t.Fatalf("unmarshal db content: %v", err)
+	}
+	if disabled, ok := dbJSON["disabled"].(bool); !ok || !disabled {
+		t.Fatalf("expected db content disabled=true, got %v", dbJSON["disabled"])
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -325,6 +430,31 @@ func testUpdateContent(t *testing.T, ctx context.Context, a, b *testStore) {
 		t.Fatalf("B has old content: %s", data)
 	}
 	t.Log("Content update A→B ✓")
+}
+
+func testDisabledContentSyncsAtoB(t *testing.T, ctx context.Context, a, b *testStore) {
+	b.clearChanges()
+
+	content := []byte(`{"type":"codex","email":"disabled@test.com","disabled":true}`)
+	persistAuthLocked(t, ctx, a, "disabled-a2b.json", content)
+
+	path := filepath.Join(b.authDir, "disabled-a2b.json")
+	if !waitForFile(t, path, 5*time.Second) {
+		t.Fatal("disabled-a2b.json did not appear on B")
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read disabled file on B: %v", err)
+	}
+	var payload map[string]any
+	if err = json.Unmarshal(data, &payload); err != nil {
+		t.Fatalf("unmarshal disabled file on B: %v", err)
+	}
+	if disabled, ok := payload["disabled"].(bool); !ok || !disabled {
+		t.Fatalf("expected B file disabled=true, got %v", payload["disabled"])
+	}
+	t.Log("Disabled content sync A→B ✓")
 }
 
 // ---------------------------------------------------------------------------
@@ -576,4 +706,109 @@ func testDelayedWatcherAfterSyncReset(t *testing.T, ctx context.Context, a, b *t
 	// Cleanup.
 	os.Remove(pathB)
 	time.Sleep(1 * time.Second)
+}
+
+func testSaveStorageAuthPersistsDisabled(t *testing.T, ctx context.Context, dsn string) {
+	tableName := fmt.Sprintf("test_auth_save_disabled_%d", time.Now().UnixNano())
+	pg, err := NewPostgresStore(ctx, PostgresStoreConfig{
+		DSN:       dsn,
+		AuthTable: tableName,
+		SpoolDir:  filepath.Join(t.TempDir(), "pgstore"),
+	})
+	if err != nil {
+		t.Fatalf("store init: %v", err)
+	}
+	defer func() {
+		pg.db.ExecContext(context.Background(), fmt.Sprintf("DROP TABLE IF EXISTS %s", pg.fullTableName(tableName)))
+		pg.Close()
+	}()
+	if err = pg.EnsureSchema(ctx); err != nil {
+		t.Fatalf("schema: %v", err)
+	}
+
+	auth := &cliproxyauth.Auth{
+		ID:       "disabled-storage.json",
+		FileName: "disabled-storage.json",
+		Provider: "codex",
+		Disabled: true,
+		Status:   cliproxyauth.StatusDisabled,
+		Storage: &codex.CodexTokenStorage{
+			Email:       "disabled@test.com",
+			AccessToken: "token",
+		},
+	}
+
+	path, err := pg.Save(ctx, auth)
+	if err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	if path == "" {
+		t.Fatal("expected saved path")
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read saved file: %v", err)
+	}
+	var filePayload map[string]any
+	if err = json.Unmarshal(data, &filePayload); err != nil {
+		t.Fatalf("unmarshal saved file: %v", err)
+	}
+	if disabled, ok := filePayload["disabled"].(bool); !ok || !disabled {
+		t.Fatalf("expected saved file disabled=true, got %v", filePayload["disabled"])
+	}
+
+	query := fmt.Sprintf("SELECT content FROM %s WHERE id = $1", pg.fullTableName(pg.cfg.AuthTable))
+	var dbPayload string
+	if err = pg.db.QueryRowContext(ctx, query, "disabled-storage.json").Scan(&dbPayload); err != nil {
+		t.Fatalf("query db content: %v", err)
+	}
+	var dbJSON map[string]any
+	if err = json.Unmarshal([]byte(dbPayload), &dbJSON); err != nil {
+		t.Fatalf("unmarshal db content: %v", err)
+	}
+	if disabled, ok := dbJSON["disabled"].(bool); !ok || !disabled {
+		t.Fatalf("expected db content disabled=true, got %v", dbJSON["disabled"])
+	}
+}
+
+func testListRestoresDisabled(t *testing.T, ctx context.Context, dsn string) {
+	tableName := fmt.Sprintf("test_auth_list_disabled_%d", time.Now().UnixNano())
+	pg, err := NewPostgresStore(ctx, PostgresStoreConfig{
+		DSN:       dsn,
+		AuthTable: tableName,
+		SpoolDir:  filepath.Join(t.TempDir(), "pgstore"),
+	})
+	if err != nil {
+		t.Fatalf("store init: %v", err)
+	}
+	defer func() {
+		pg.db.ExecContext(context.Background(), fmt.Sprintf("DROP TABLE IF EXISTS %s", pg.fullTableName(tableName)))
+		pg.Close()
+	}()
+	if err = pg.EnsureSchema(ctx); err != nil {
+		t.Fatalf("schema: %v", err)
+	}
+
+	payload := []byte(`{"type":"codex","email":"disabled@test.com","disabled":true}`)
+	if err = pg.persistAuth(ctx, "disabled-listed.json", payload); err != nil {
+		t.Fatalf("persist auth: %v", err)
+	}
+
+	auths, err := pg.List(ctx)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(auths) != 1 {
+		t.Fatalf("expected 1 auth, got %d", len(auths))
+	}
+	if !auths[0].Disabled {
+		t.Fatal("expected listed auth to be disabled")
+	}
+	if auths[0].Status != cliproxyauth.StatusDisabled {
+		t.Fatalf("expected status disabled, got %s", auths[0].Status)
+	}
+	if disabled, ok := auths[0].Metadata["disabled"].(bool); !ok || !disabled {
+		t.Fatalf("expected metadata disabled=true, got %v", auths[0].Metadata["disabled"])
+	}
 }
