@@ -24,7 +24,12 @@ type usageImportPayload struct {
 func (h *Handler) GetUsageStatistics(c *gin.Context) {
 	var snapshot usage.StatisticsSnapshot
 	if h != nil && h.usageStats != nil {
-		snapshot = h.usageStats.Snapshot()
+		var err error
+		snapshot, err = h.usageStats.Snapshot(c.Request.Context())
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load usage statistics"})
+			return
+		}
 	}
 	c.JSON(http.StatusOK, gin.H{
 		"usage":           snapshot,
@@ -36,7 +41,12 @@ func (h *Handler) GetUsageStatistics(c *gin.Context) {
 func (h *Handler) ExportUsageStatistics(c *gin.Context) {
 	var snapshot usage.StatisticsSnapshot
 	if h != nil && h.usageStats != nil {
-		snapshot = h.usageStats.Snapshot()
+		var err error
+		snapshot, err = h.usageStats.Snapshot(c.Request.Context())
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to export usage statistics"})
+			return
+		}
 	}
 	c.JSON(http.StatusOK, usageExportPayload{
 		Version:    1,
@@ -68,8 +78,16 @@ func (h *Handler) ImportUsageStatistics(c *gin.Context) {
 		return
 	}
 
-	result := h.usageStats.MergeSnapshot(payload.Usage)
-	snapshot := h.usageStats.Snapshot()
+	result, err := h.usageStats.MergeSnapshot(c.Request.Context(), payload.Usage)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to import usage statistics"})
+		return
+	}
+	snapshot, err := h.usageStats.Snapshot(c.Request.Context())
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load usage statistics"})
+		return
+	}
 	c.JSON(http.StatusOK, gin.H{
 		"added":           result.Added,
 		"skipped":         result.Skipped,

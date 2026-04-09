@@ -13,6 +13,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	coreusage "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
+	log "github.com/sirupsen/logrus"
 )
 
 var statisticsEnabled atomic.Bool
@@ -22,17 +23,17 @@ func init() {
 	coreusage.RegisterPlugin(NewLoggerPlugin())
 }
 
-// LoggerPlugin collects in-memory request statistics for usage analysis.
+var (
+	statisticsBackendMu sync.RWMutex
+	statisticsBackend   StatisticsBackend = NewInMemoryStatisticsBackend(defaultRequestStatistics)
+)
+
+// LoggerPlugin collects usage statistics through the configured backend.
 // It implements coreusage.Plugin to receive usage records emitted by the runtime.
-type LoggerPlugin struct {
-	stats *RequestStatistics
-}
+type LoggerPlugin struct{}
 
 // NewLoggerPlugin constructs a new logger plugin instance.
-//
-// Returns:
-//   - *LoggerPlugin: A new logger plugin instance wired to the shared statistics store.
-func NewLoggerPlugin() *LoggerPlugin { return &LoggerPlugin{stats: defaultRequestStatistics} }
+func NewLoggerPlugin() *LoggerPlugin { return &LoggerPlugin{} }
 
 // HandleUsage implements coreusage.Plugin.
 // It updates the in-memory statistics store whenever a usage record is received.
@@ -44,10 +45,13 @@ func (p *LoggerPlugin) HandleUsage(ctx context.Context, record coreusage.Record)
 	if !statisticsEnabled.Load() {
 		return
 	}
-	if p == nil || p.stats == nil {
+	backend := GetStatisticsBackend()
+	if backend == nil {
 		return
 	}
-	p.stats.Record(ctx, record)
+	if err := backend.Record(ctx, record); err != nil {
+		log.WithError(err).Warn("usage: failed to persist usage record")
+	}
 }
 
 // SetStatisticsEnabled toggles whether in-memory statistics are recorded.
@@ -139,6 +143,29 @@ var defaultRequestStatistics = NewRequestStatistics()
 
 // GetRequestStatistics returns the shared statistics store.
 func GetRequestStatistics() *RequestStatistics { return defaultRequestStatistics }
+
+// GetStatisticsBackend returns the currently configured usage backend.
+func GetStatisticsBackend() StatisticsBackend {
+	statisticsBackendMu.RLock()
+	defer statisticsBackendMu.RUnlock()
+	return statisticsBackend
+}
+
+// SetStatisticsBackend configures the shared usage backend.
+func SetStatisticsBackend(backend StatisticsBackend) {
+	statisticsBackendMu.Lock()
+	defer statisticsBackendMu.Unlock()
+	if backend == nil {
+		statisticsBackend = NewInMemoryStatisticsBackend(defaultRequestStatistics)
+		return
+	}
+	statisticsBackend = backend
+}
+
+// NewInMemoryStatisticsBackend wraps RequestStatistics in the shared backend interface.
+func NewInMemoryStatisticsBackend(stats *RequestStatistics) StatisticsBackend {
+	return &inMemoryStatisticsBackend{stats: stats}
+}
 
 // NewRequestStatistics constructs an empty statistics store.
 func NewRequestStatistics() *RequestStatistics {
@@ -287,6 +314,32 @@ func (s *RequestStatistics) Snapshot() StatisticsSnapshot {
 type MergeResult struct {
 	Added   int64 `json:"added"`
 	Skipped int64 `json:"skipped"`
+}
+
+type inMemoryStatisticsBackend struct {
+	stats *RequestStatistics
+}
+
+func (b *inMemoryStatisticsBackend) Record(ctx context.Context, record coreusage.Record) error {
+	if b == nil || b.stats == nil {
+		return nil
+	}
+	b.stats.Record(ctx, record)
+	return nil
+}
+
+func (b *inMemoryStatisticsBackend) Snapshot(_ context.Context) (StatisticsSnapshot, error) {
+	if b == nil || b.stats == nil {
+		return StatisticsSnapshot{}, nil
+	}
+	return b.stats.Snapshot(), nil
+}
+
+func (b *inMemoryStatisticsBackend) MergeSnapshot(_ context.Context, snapshot StatisticsSnapshot) (MergeResult, error) {
+	if b == nil || b.stats == nil {
+		return MergeResult{}, nil
+	}
+	return b.stats.MergeSnapshot(snapshot), nil
 }
 
 // MergeSnapshot merges an exported statistics snapshot into the current store.
