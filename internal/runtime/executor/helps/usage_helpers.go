@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"net/http"
 	"strings"
 	"sync"
 	"time"
@@ -70,7 +71,7 @@ func (r *UsageReporter) publishWithOutcome(ctx context.Context, detail usage.Det
 		}
 	}
 	r.once.Do(func() {
-		usage.PublishRecord(ctx, r.buildRecord(detail, failed))
+		usage.PublishRecord(ctx, r.buildRecord(ctx,detail, failed))
 	})
 }
 
@@ -83,25 +84,28 @@ func (r *UsageReporter) EnsurePublished(ctx context.Context) {
 		return
 	}
 	r.once.Do(func() {
-		usage.PublishRecord(ctx, r.buildRecord(usage.Detail{}, false))
+		usage.PublishRecord(ctx, r.buildRecord(ctx,usage.Detail{}, false))
 	})
 }
 
-func (r *UsageReporter) buildRecord(detail usage.Detail, failed bool) usage.Record {
+func (r *UsageReporter) buildRecord(ctx context.Context, detail usage.Detail, failed bool) usage.Record {
 	if r == nil {
 		return usage.Record{Detail: detail, Failed: failed}
 	}
 	return usage.Record{
-		Provider:    r.provider,
-		Model:       r.model,
-		Source:      r.source,
-		APIKey:      r.apiKey,
-		AuthID:      r.authID,
-		AuthIndex:   r.authIndex,
-		RequestedAt: r.requestedAt,
-		Latency:     r.latency(),
-		Failed:      failed,
-		Detail:      detail,
+		Provider:          r.provider,
+		Model:             r.model,
+		Source:            r.source,
+		APIKey:            r.apiKey,
+		AuthID:            r.authID,
+		AuthIndex:         r.authIndex,
+		FallbackAPIKey:    usageAPIKeyFallback(ctx, r.provider),
+		FallbackFailed:    usageFailedFallback(ctx),
+		HasFallbackFailed: hasUsageFailedFallback(ctx),
+		RequestedAt:       r.requestedAt,
+		Latency:           r.latency(),
+		Failed:            failed,
+		Detail:            detail,
 	}
 }
 
@@ -135,6 +139,57 @@ func APIKeyFromContext(ctx context.Context) string {
 		}
 	}
 	return ""
+}
+
+func usageAPIKeyFallback(ctx context.Context, provider string) string {
+	if value := APIKeyFromContext(ctx); strings.TrimSpace(value) != "" {
+		return value
+	}
+	if ctx != nil {
+		if ginCtx, ok := ctx.Value("gin").(*gin.Context); ok && ginCtx != nil {
+			path := ginCtx.FullPath()
+			if path == "" && ginCtx.Request != nil {
+				path = ginCtx.Request.URL.Path
+			}
+			method := ""
+			if ginCtx.Request != nil {
+				method = ginCtx.Request.Method
+			}
+			if path != "" {
+				if method != "" {
+					return method + " " + path
+				}
+				return path
+			}
+		}
+	}
+	if strings.TrimSpace(provider) != "" {
+		return provider
+	}
+	return ""
+}
+
+func hasUsageFailedFallback(ctx context.Context) bool {
+	if ctx == nil {
+		return false
+	}
+	ginCtx, ok := ctx.Value("gin").(*gin.Context)
+	return ok && ginCtx != nil
+}
+
+func usageFailedFallback(ctx context.Context) bool {
+	if ctx == nil {
+		return false
+	}
+	ginCtx, ok := ctx.Value("gin").(*gin.Context)
+	if !ok || ginCtx == nil {
+		return false
+	}
+	status := ginCtx.Writer.Status()
+	if status == 0 {
+		return false
+	}
+	return status >= http.StatusBadRequest
 }
 
 func resolveUsageSource(auth *cliproxyauth.Auth, ctxAPIKey string) string {
