@@ -49,6 +49,7 @@ type serverOptionConfig struct {
 	engineConfigurator   func(*gin.Engine)
 	routerConfigurator   func(*gin.Engine, *handlers.BaseAPIHandler, *config.Config)
 	requestLoggerFactory func(*config.Config, string) logging.RequestLogger
+	usageBackend         usage.StatisticsBackend
 	localPassword        string
 	keepAliveEnabled     bool
 	keepAliveTimeout     time.Duration
@@ -83,6 +84,13 @@ func WithEngineConfigurator(fn func(*gin.Engine)) ServerOption {
 func WithRouterConfigurator(fn func(*gin.Engine, *handlers.BaseAPIHandler, *config.Config)) ServerOption {
 	return func(cfg *serverOptionConfig) {
 		cfg.routerConfigurator = fn
+	}
+}
+
+// WithUsageBackend injects a usage statistics backend for management handlers.
+func WithUsageBackend(backend usage.StatisticsBackend) ServerOption {
+	return func(cfg *serverOptionConfig) {
+		cfg.usageBackend = backend
 	}
 }
 
@@ -266,6 +274,9 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	applySignatureCacheConfig(nil, cfg)
 	// Initialize management handler
 	s.mgmt = managementHandlers.NewHandler(cfg, configFilePath, authManager)
+	if optionState.usageBackend != nil {
+		s.mgmt.SetUsageStatistics(optionState.usageBackend)
+	}
 	if optionState.localPassword != "" {
 		s.mgmt.SetLocalPassword(optionState.localPassword)
 	}

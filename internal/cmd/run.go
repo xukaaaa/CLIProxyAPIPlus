@@ -12,6 +12,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/api"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy"
 	log "github.com/sirupsen/logrus"
 )
@@ -29,6 +30,9 @@ func StartService(cfg *config.Config, configPath string, localPassword string) {
 		WithConfig(cfg).
 		WithConfigPath(configPath).
 		WithLocalManagementPassword(localPassword)
+	if backend := usage.GetStatisticsBackend(); backend != nil {
+		builder = builder.WithUsageBackend(backend)
+	}
 
 	ctxSignal, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
@@ -62,6 +66,9 @@ func StartServiceBackground(cfg *config.Config, configPath string, localPassword
 		WithConfig(cfg).
 		WithConfigPath(configPath).
 		WithLocalManagementPassword(localPassword)
+	if backend := usage.GetStatisticsBackend(); backend != nil {
+		builder = builder.WithUsageBackend(backend)
+	}
 
 	ctx, cancelFn := context.WithCancel(context.Background())
 	doneCh := make(chan struct{})
