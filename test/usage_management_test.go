@@ -46,7 +46,7 @@ func setupUsageRouter(h *management.Handler) *gin.Engine {
 func seedUsageRecord(t *testing.T, stats *usage.RequestStatistics) {
 	t.Helper()
 	stats.Record(context.Background(), coreusage.Record{
-		APIKey:      "Thuyanh1110",
+		APIKey:      "test-api-key",
 		Model:       "accounts/fireworks/models/qwen3p6-plus",
 		RequestedAt: time.Date(2026, 4, 8, 10, 8, 34, 0, time.UTC),
 		Latency:     12251 * time.Millisecond,
@@ -90,6 +90,7 @@ func TestGetUsageStatisticsReturnsCurrentSchema(t *testing.T) {
 						LatencyMs int64     `json:"latency_ms"`
 						Source    string    `json:"source"`
 						AuthIndex string    `json:"auth_index"`
+						MachineID string    `json:"machine_id"`
 						Tokens    struct {
 							InputTokens     int64 `json:"input_tokens"`
 							OutputTokens    int64 `json:"output_tokens"`
@@ -125,7 +126,7 @@ func TestGetUsageStatisticsReturnsCurrentSchema(t *testing.T) {
 		t.Fatalf("expected failed_requests mirror failure_count, got %d vs %d", resp.FailedRequests, resp.Usage.FailureCount)
 	}
 
-	api, ok := resp.Usage.APIs["Thuyanh1110"]
+	api, ok := resp.Usage.APIs["test-api-key"]
 	if !ok {
 		t.Fatal("expected api entry for Thuyanh1110")
 	}
@@ -138,6 +139,9 @@ func TestGetUsageStatisticsReturnsCurrentSchema(t *testing.T) {
 	}
 	if model.Details[0].LatencyMs != 12251 {
 		t.Fatalf("expected latency_ms 12251, got %d", model.Details[0].LatencyMs)
+	}
+	if model.Details[0].MachineID != "" {
+		t.Fatalf("expected empty machine_id for in-memory /usage detail, got %q", model.Details[0].MachineID)
 	}
 	if model.Details[0].Tokens.TotalTokens != 159016 {
 		t.Fatalf("expected total_tokens 159016, got %d", model.Details[0].Tokens.TotalTokens)
@@ -182,7 +186,7 @@ func TestExportUsageStatisticsReturnsCurrentSchema(t *testing.T) {
 	if resp.Usage.TotalRequests != 1 {
 		t.Fatalf("expected total_requests 1, got %d", resp.Usage.TotalRequests)
 	}
-	if got := len(resp.Usage.APIs["Thuyanh1110"].Models["accounts/fireworks/models/qwen3p6-plus"].Details); got != 1 {
+	if got := len(resp.Usage.APIs["test-api-key"].Models["accounts/fireworks/models/qwen3p6-plus"].Details); got != 1 {
 		t.Fatalf("expected 1 exported detail, got %d", got)
 	}
 }
@@ -195,7 +199,7 @@ func TestImportUsageStatisticsReturnsAddedSkippedAndTotals(t *testing.T) {
 		"version": 1,
 		"usage": {
 			"apis": {
-				"Thuyanh1110": {
+				"test-api-key": {
 					"models": {
 						"accounts/fireworks/models/qwen3p6-plus": {
 							"details": [
@@ -277,7 +281,7 @@ func TestGetUsageStatisticsWithPostgresBackendReturnsCurrentSchema(t *testing.T)
 		t.Fatalf("ensure schema: %v", err)
 	}
 	if err := store.Record(context.Background(), coreusage.Record{
-		APIKey:      "Thuyanh1110",
+		APIKey:      "test-api-key",
 		Model:       "accounts/fireworks/models/qwen3p6-plus",
 		RequestedAt: time.Date(2026, 4, 8, 10, 8, 34, 0, time.UTC),
 		Latency:     12251 * time.Millisecond,
@@ -298,14 +302,38 @@ func TestGetUsageStatisticsWithPostgresBackendReturnsCurrentSchema(t *testing.T)
 		t.Fatalf("expected status %d, got %d: %s", http.StatusOK, w.Code, w.Body.String())
 	}
 
-	var resp map[string]any
+	var resp map[string]json.RawMessage
 	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("failed to unmarshal response: %v", err)
 	}
-	if _, ok := resp["usage"]; !ok {
-		t.Fatal("expected usage field")
-	}
-	if _, ok := resp["failed_requests"]; !ok {
+	failedRequestsRaw, ok := resp["failed_requests"]
+	if !ok {
 		t.Fatal("expected failed_requests field")
+	}
+	var failedRequests int64
+	if err := json.Unmarshal(failedRequestsRaw, &failedRequests); err != nil {
+		t.Fatalf("failed to unmarshal failed_requests: %v", err)
+	}
+	if failedRequests != 0 {
+		t.Fatalf("expected failed_requests 0, got %d", failedRequests)
+	}
+	var usageBody struct {
+		APIs map[string]struct {
+			Models map[string]struct {
+				Details []struct {
+					MachineID string `json:"machine_id"`
+				} `json:"details"`
+			} `json:"models"`
+		} `json:"apis"`
+	}
+	if err := json.Unmarshal(resp["usage"], &usageBody); err != nil {
+		t.Fatalf("failed to unmarshal usage: %v", err)
+	}
+	details := usageBody.APIs["test-api-key"].Models["accounts/fireworks/models/qwen3p6-plus"].Details
+	if len(details) != 1 {
+		t.Fatalf("expected 1 detail, got %d", len(details))
+	}
+	if details[0].MachineID != store.MachineID() {
+		t.Fatalf("expected machine_id %q, got %q", store.MachineID(), details[0].MachineID)
 	}
 }
