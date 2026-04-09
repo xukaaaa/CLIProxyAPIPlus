@@ -97,6 +97,7 @@ type RequestDetail struct {
 	LatencyMs int64      `json:"latency_ms"`
 	Source    string     `json:"source"`
 	AuthIndex string     `json:"auth_index"`
+	MachineID string     `json:"machine_id,omitempty"`
 	Tokens    TokenStats `json:"tokens"`
 	Failed    bool       `json:"failed"`
 }
@@ -198,7 +199,7 @@ func (s *RequestStatistics) Record(ctx context.Context, record coreusage.Record)
 	}
 	failed := record.Failed
 	if !failed {
-		failed = !resolveSuccess(ctx)
+		failed = !resolveSuccess(ctx, record)
 	}
 	success := !failed
 	modelName := record.Model
@@ -229,6 +230,7 @@ func (s *RequestStatistics) Record(ctx context.Context, record coreusage.Record)
 		LatencyMs: normaliseLatency(record.Latency),
 		Source:    record.Source,
 		AuthIndex: record.AuthIndex,
+		MachineID: record.MachineID,
 		Tokens:    detail,
 		Failed:    failed,
 	})
@@ -437,12 +439,13 @@ func dedupKey(apiName, modelName string, detail RequestDetail) string {
 	timestamp := detail.Timestamp.UTC().Format(time.RFC3339Nano)
 	tokens := normaliseTokenStats(detail.Tokens)
 	return fmt.Sprintf(
-		"%s|%s|%s|%s|%s|%t|%d|%d|%d|%d|%d",
+		"%s|%s|%s|%s|%s|%s|%t|%d|%d|%d|%d|%d",
 		apiName,
 		modelName,
 		timestamp,
 		detail.Source,
 		detail.AuthIndex,
+		detail.MachineID,
 		detail.Failed,
 		tokens.InputTokens,
 		tokens.OutputTokens,
@@ -453,6 +456,9 @@ func dedupKey(apiName, modelName string, detail RequestDetail) string {
 }
 
 func resolveAPIIdentifier(ctx context.Context, record coreusage.Record) string {
+	if fallback := strings.TrimSpace(record.FallbackAPIKey); fallback != "" {
+		return fallback
+	}
 	if ctx != nil {
 		if ginCtx, ok := ctx.Value("gin").(*gin.Context); ok && ginCtx != nil {
 			path := ginCtx.FullPath()
@@ -477,7 +483,10 @@ func resolveAPIIdentifier(ctx context.Context, record coreusage.Record) string {
 	return "unknown"
 }
 
-func resolveSuccess(ctx context.Context) bool {
+func resolveSuccess(ctx context.Context, record coreusage.Record) bool {
+	if record.HasFallbackFailed {
+		return !record.FallbackFailed
+	}
 	if ctx == nil {
 		return true
 	}

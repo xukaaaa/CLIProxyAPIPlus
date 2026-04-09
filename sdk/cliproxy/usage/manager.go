@@ -8,18 +8,24 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
+const dispatchTimeout = 30 * time.Second
+
 // Record contains the usage statistics captured for a single provider request.
 type Record struct {
-	Provider    string
-	Model       string
-	APIKey      string
-	AuthID      string
-	AuthIndex   string
-	Source      string
-	RequestedAt time.Time
-	Latency     time.Duration
-	Failed      bool
-	Detail      Detail
+	Provider           string
+	Model              string
+	APIKey             string
+	AuthID             string
+	AuthIndex          string
+	Source             string
+	MachineID          string
+	FallbackAPIKey     string
+	FallbackFailed     bool
+	HasFallbackFailed  bool
+	RequestedAt        time.Time
+	Latency            time.Duration
+	Failed             bool
+	Detail             Detail
 }
 
 // Detail holds the token usage breakdown.
@@ -147,12 +153,22 @@ func (m *Manager) dispatch(item queueItem) {
 	if len(plugins) == 0 {
 		return
 	}
+	dispatchCtx, cancel := detachedDispatchContext(item.ctx)
+	defer cancel()
 	for _, plugin := range plugins {
 		if plugin == nil {
 			continue
 		}
-		safeInvoke(plugin, item.ctx, item.record)
+		safeInvoke(plugin, dispatchCtx, item.record)
 	}
+}
+
+func detachedDispatchContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	base := context.Background()
+	if ctx != nil {
+		base = context.WithoutCancel(ctx)
+	}
+	return context.WithTimeout(base, dispatchTimeout)
 }
 
 func safeInvoke(plugin Plugin, ctx context.Context, record Record) {
