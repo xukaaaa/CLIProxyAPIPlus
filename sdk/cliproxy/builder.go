@@ -10,6 +10,7 @@ import (
 
 	configaccess "github.com/router-for-me/CLIProxyAPI/v6/internal/access/config_access"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/api"
+	internalusage "github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v6/sdk/access"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v6/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
@@ -19,6 +20,8 @@ import (
 // Builder constructs a Service instance with customizable providers.
 // It provides a fluent interface for configuring all aspects of the service
 // including authentication, file watching, HTTP server options, and lifecycle hooks.
+type apiUsageBackend = internalusage.StatisticsBackend
+
 type Builder struct {
 	// cfg holds the application configuration.
 	cfg *config.Config
@@ -142,6 +145,15 @@ func (b *Builder) WithCoreAuthManager(mgr *coreauth.Manager) *Builder {
 // WithServerOptions appends server configuration options used during construction.
 func (b *Builder) WithServerOptions(opts ...api.ServerOption) *Builder {
 	b.serverOptions = append(b.serverOptions, opts...)
+	return b
+}
+
+// WithUsageBackend injects a usage statistics backend into the HTTP server.
+func (b *Builder) WithUsageBackend(backend apiUsageBackend) *Builder {
+	if backend == nil {
+		return b
+	}
+	b.serverOptions = append(b.serverOptions, api.WithUsageBackend(backend))
 	return b
 }
 

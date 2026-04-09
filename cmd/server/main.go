@@ -184,6 +184,7 @@ func main() {
 		pgStoreSchema        string
 		pgStoreLocalPath     string
 		pgStoreInst          *store.PostgresStore
+		pgUsageStore         *usage.PostgresUsageStore
 		useGitStore          bool
 		gitStoreRemoteURL    string
 		gitStoreUser         string
@@ -319,6 +320,21 @@ func main() {
 			log.Infof("postgres-backed token store enabled, workspace path: %s", pgStoreInst.WorkDir())
 		}
 		pgStoreInst.StartListener(context.Background())
+		ctx, cancel = context.WithTimeout(context.Background(), 30*time.Second)
+		pgUsageStore, err = usage.NewPostgresUsageStore(ctx, usage.PostgresUsageStoreConfig{
+			DSN:    pgStoreDSN,
+			Schema: pgStoreSchema,
+		})
+		if err == nil {
+			err = pgUsageStore.EnsureSchema(ctx)
+		}
+		cancel()
+		if err != nil {
+			log.Errorf("failed to initialize postgres usage store: %v", err)
+			return
+		}
+		usage.SetStatisticsBackend(pgUsageStore)
+		defer pgUsageStore.Close()
 	} else if useObjectStore {
 		if objectStoreLocalPath == "" {
 			if writableBase != "" {
