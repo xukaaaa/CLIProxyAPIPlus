@@ -51,6 +51,70 @@ func TestParseOpenAIUsageResponses(t *testing.T) {
 	}
 }
 
+func TestParseOpenAIStreamUsageIgnoresNullUsage(t *testing.T) {
+	line := []byte("data: {\"usage\":null}")
+
+	if _, ok := ParseOpenAIStreamUsage(line); ok {
+		t.Fatal("ParseOpenAIStreamUsage() ok = true, want false for null usage")
+	}
+}
+
+func TestParseOpenAIStreamUsageIgnoresZeroUsagePlaceholder(t *testing.T) {
+	line := []byte("data: {\"usage\":{\"prompt_tokens\":0,\"completion_tokens\":0,\"total_tokens\":0}}")
+
+	if _, ok := ParseOpenAIStreamUsage(line); ok {
+		t.Fatal("ParseOpenAIStreamUsage() ok = true, want false for zero usage placeholder")
+	}
+}
+
+func TestParseOpenAIStreamUsageParsesFinalUsageChunk(t *testing.T) {
+	line := []byte("data: {\"usage\":{\"prompt_tokens\":12,\"completion_tokens\":5,\"total_tokens\":17,\"prompt_tokens_details\":{\"cached_tokens\":3},\"completion_tokens_details\":{\"reasoning_tokens\":2}}}")
+
+	detail, ok := ParseOpenAIStreamUsage(line)
+	if !ok {
+		t.Fatal("ParseOpenAIStreamUsage() ok = false, want true")
+	}
+	if detail.InputTokens != 12 {
+		t.Fatalf("input tokens = %d, want %d", detail.InputTokens, 12)
+	}
+	if detail.OutputTokens != 5 {
+		t.Fatalf("output tokens = %d, want %d", detail.OutputTokens, 5)
+	}
+	if detail.TotalTokens != 17 {
+		t.Fatalf("total tokens = %d, want %d", detail.TotalTokens, 17)
+	}
+	if detail.CachedTokens != 3 {
+		t.Fatalf("cached tokens = %d, want %d", detail.CachedTokens, 3)
+	}
+	if detail.ReasoningTokens != 2 {
+		t.Fatalf("reasoning tokens = %d, want %d", detail.ReasoningTokens, 2)
+	}
+}
+
+func TestParseOpenAIStreamUsageParsesResponsesStyleUsageChunk(t *testing.T) {
+	line := []byte("data: {\"usage\":{\"input_tokens\":10,\"output_tokens\":4,\"total_tokens\":14,\"input_tokens_details\":{\"cached_tokens\":2},\"output_tokens_details\":{\"reasoning_tokens\":1}}}")
+
+	detail, ok := ParseOpenAIStreamUsage(line)
+	if !ok {
+		t.Fatal("ParseOpenAIStreamUsage() ok = false, want true")
+	}
+	if detail.InputTokens != 10 {
+		t.Fatalf("input tokens = %d, want %d", detail.InputTokens, 10)
+	}
+	if detail.OutputTokens != 4 {
+		t.Fatalf("output tokens = %d, want %d", detail.OutputTokens, 4)
+	}
+	if detail.TotalTokens != 14 {
+		t.Fatalf("total tokens = %d, want %d", detail.TotalTokens, 14)
+	}
+	if detail.CachedTokens != 2 {
+		t.Fatalf("cached tokens = %d, want %d", detail.CachedTokens, 2)
+	}
+	if detail.ReasoningTokens != 1 {
+		t.Fatalf("reasoning tokens = %d, want %d", detail.ReasoningTokens, 1)
+	}
+}
+
 func TestUsageReporterBuildRecordIncludesLatency(t *testing.T) {
 	reporter := &UsageReporter{
 		provider:    "openai",
