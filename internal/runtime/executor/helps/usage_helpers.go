@@ -296,7 +296,7 @@ func ParseOpenAIStreamUsage(line []byte) (usage.Detail, bool) {
 		return usage.Detail{}, false
 	}
 	usageNode := gjson.GetBytes(payload, "usage")
-	if !usageNode.Exists() {
+	if !usageNode.Exists() || usageNode.Type == gjson.Null {
 		return usage.Detail{}, false
 	}
 
@@ -328,6 +328,9 @@ func ParseOpenAIStreamUsage(line []byte) (usage.Detail, bool) {
 	}
 	if reasoning.Exists() {
 		detail.ReasoningTokens = reasoning.Int()
+	}
+	if detail.InputTokens == 0 && detail.OutputTokens == 0 && detail.TotalTokens == 0 && detail.CachedTokens == 0 && detail.ReasoningTokens == 0 {
+		return usage.Detail{}, false
 	}
 	return detail, true
 }

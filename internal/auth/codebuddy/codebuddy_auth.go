@@ -20,8 +20,8 @@ import (
 )
 
 const (
-	BaseURL       = "https://copilot.tencent.com"
-	DefaultDomain = "www.codebuddy.cn"
+	BaseURL       = "https://www.codebuddy.ai"
+	DefaultDomain = "www.codebuddy.ai"
 	UserAgent     = "CLI/2.63.2 CodeBuddy/2.63.2"
 
 	codeBuddyStatePath   = "/v2/plugin/auth/state"
@@ -67,7 +67,7 @@ requestID := uuid.NewString()
 	req.Header.Set("Accept", "application/json, text/plain, */*")
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Requested-With", "XMLHttpRequest")
-	req.Header.Set("X-Domain", "copilot.tencent.com")
+	req.Header.Set("X-Domain", "codebuddy.ai")
 	req.Header.Set("X-No-Authorization", "true")
 	req.Header.Set("X-No-User-Id", "true")
 	req.Header.Set("X-No-Enterprise-Id", "true")
@@ -108,13 +108,16 @@ requestID := uuid.NewString()
 	if result.Code != codeSuccess {
 		return nil, fmt.Errorf("codebuddy: auth state request failed with code %d: %s", result.Code, result.Msg)
 	}
-	if result.Data == nil || result.Data.State == "" || result.Data.AuthURL == "" {
-		return nil, fmt.Errorf("codebuddy: auth state response missing state or authUrl")
+	if result.Data == nil || result.Data.State == "" {
+		return nil, fmt.Errorf("codebuddy: auth state response missing state")
 	}
+
+	// Override authURL to use the correct format
+	authURL := fmt.Sprintf("%s/login?platform=CLI&state=%s", a.baseURL, result.Data.State)
 
 	return &AuthState{
 		State:   result.Data.State,
-		AuthURL: result.Data.AuthURL,
+		AuthURL: authURL,
 	}, nil
 }
 
