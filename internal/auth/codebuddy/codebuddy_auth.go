@@ -24,6 +24,18 @@ const (
 	DefaultDomain = "www.codebuddy.cn"
 	UserAgent     = "CLI/2.63.2 CodeBuddy/2.63.2"
 
+	EnvironmentMainland      = "mainland"
+	EnvironmentInternational = "international"
+
+	InternationalLoginURLBase = "https://www.codebuddy.ai"
+	InternationalDomain       = "www.codebuddy.ai"
+
+	MetadataEnvironment = "environment"
+	MetadataBaseURL     = "base_url"
+	MetadataChatBaseURL = "chat_base_url"
+	MetadataLoginURLBase = "login_url_base"
+	MetadataDomain      = "domain"
+
 	codeBuddyStatePath   = "/v2/plugin/auth/state"
 	codeBuddyTokenPath   = "/v2/plugin/auth/token"
 	codeBuddyRefreshPath = "/v2/plugin/auth/token/refresh"
@@ -33,18 +45,122 @@ const (
 	codeSuccess          = 0
 )
 
+type EnvironmentConfig struct {
+	Environment      string
+	BaseURL          string
+	ChatBaseURL      string
+	LoginURLBase     string
+	DefaultDomain    string
+	AuthStateXDomain string
+}
+
 type CodeBuddyAuth struct {
 	httpClient *http.Client
 	cfg        *config.Config
-	baseURL    string
+	env        EnvironmentConfig
+}
+
+func defaultEnvironmentConfig(environment string) EnvironmentConfig {
+	switch NormalizeEnvironment(environment) {
+	case EnvironmentInternational:
+		return EnvironmentConfig{
+			Environment:      EnvironmentInternational,
+			BaseURL:          InternationalLoginURLBase,
+			ChatBaseURL:      InternationalLoginURLBase,
+			LoginURLBase:     InternationalLoginURLBase,
+			DefaultDomain:    InternationalDomain,
+			AuthStateXDomain: InternationalDomain,
+		}
+	default:
+		return EnvironmentConfig{
+			Environment:      EnvironmentMainland,
+			BaseURL:          BaseURL,
+			ChatBaseURL:      BaseURL,
+			LoginURLBase:     BaseURL,
+			DefaultDomain:    DefaultDomain,
+			AuthStateXDomain: "copilot.tencent.com",
+		}
+	}
+}
+
+func NormalizeEnvironment(environment string) string {
+	switch strings.ToLower(strings.TrimSpace(environment)) {
+	case "", EnvironmentMainland:
+		return EnvironmentMainland
+	case EnvironmentInternational:
+		return EnvironmentInternational
+	default:
+		return ""
+	}
+}
+
+func ParseEnvironment(environment string) (string, error) {
+	normalized := NormalizeEnvironment(environment)
+	if normalized == "" {
+		return "", fmt.Errorf("codebuddy: invalid region %q (expected %s or %s)", environment, EnvironmentMainland, EnvironmentInternational)
+	}
+	return normalized, nil
+}
+
+func ResolveEnvironmentConfig(environment string) EnvironmentConfig {
+	return defaultEnvironmentConfig(environment)
+}
+
+func ResolveEnvironmentConfigFromMetadata(metadata map[string]any) EnvironmentConfig {
+	environment := metaString(metadata, MetadataEnvironment)
+	if environment == "" {
+		environment = inferEnvironmentFromMetadata(metadata)
+	}
+	cfg := defaultEnvironmentConfig(environment)
+	if cfg.BaseURL == "" {
+		cfg.BaseURL = BaseURL
+	}
+	if cfg.ChatBaseURL == "" {
+		cfg.ChatBaseURL = cfg.BaseURL
+	}
+	if cfg.LoginURLBase == "" {
+		cfg.LoginURLBase = cfg.BaseURL
+	}
+	if cfg.DefaultDomain == "" {
+		cfg.DefaultDomain = DefaultDomain
+	}
+	if cfg.AuthStateXDomain == "" {
+		cfg.AuthStateXDomain = cfg.DefaultDomain
+	}
+	return cfg
+}
+
+func inferEnvironmentFromMetadata(metadata map[string]any) string {
+	domain := strings.ToLower(metaString(metadata, MetadataDomain))
+	if domain == strings.ToLower(InternationalDomain) {
+		return EnvironmentInternational
+	}
+	if accessToken := metaString(metadata, "access_token"); accessToken != "" {
+		if issuer, err := tokenIssuer(accessToken); err == nil && strings.Contains(strings.ToLower(issuer), "www.codebuddy.ai") {
+			return EnvironmentInternational
+		}
+	}
+	return EnvironmentMainland
 }
 
 func NewCodeBuddyAuth(cfg *config.Config) *CodeBuddyAuth {
+	return NewCodeBuddyAuthForEnvironment(cfg, EnvironmentMainland)
+}
+
+func NewCodeBuddyAuthForEnvironment(cfg *config.Config, environment string) *CodeBuddyAuth {
+	return newCodeBuddyAuthWithConfig(cfg, ResolveEnvironmentConfig(environment))
+}
+
+func NewCodeBuddyAuthFromMetadata(cfg *config.Config, metadata map[string]any) *CodeBuddyAuth {
+	return newCodeBuddyAuthWithConfig(cfg, ResolveEnvironmentConfigFromMetadata(metadata))
+}
+
+func newCodeBuddyAuthWithConfig(cfg *config.Config, env EnvironmentConfig) *CodeBuddyAuth {
 	httpClient := &http.Client{Timeout: 30 * time.Second}
 	if cfg != nil {
 		httpClient = util.SetProxy(&cfg.SDKConfig, httpClient)
 	}
-	return &CodeBuddyAuth{httpClient: httpClient, cfg: cfg, baseURL: BaseURL}
+	return &CodeBuddyAuth{httpClient: httpClient, cfg: cfg, env: env}
 }
 
 // AuthState holds the state and auth URL returned by the auth state API.
@@ -55,7 +171,7 @@ type AuthState struct {
 
 // FetchAuthState calls POST /v2/plugin/auth/state?platform=CLI to get the state and login URL.
 func (a *CodeBuddyAuth) FetchAuthState(ctx context.Context) (*AuthState, error) {
-	stateURL := fmt.Sprintf("%s%s?platform=CLI", a.baseURL, codeBuddyStatePath)
+	stateURL := fmt.Sprintf("%s%s?platform=CLI", a.env.BaseURL, codeBuddyStatePath)
 	body := []byte("{}")
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, stateURL, bytes.NewReader(body))
@@ -63,11 +179,11 @@ func (a *CodeBuddyAuth) FetchAuthState(ctx context.Context) (*AuthState, error) 
 		return nil, fmt.Errorf("codebuddy: failed to create auth state request: %w", err)
 	}
 
-requestID := uuid.NewString()
+	requestID := uuid.NewString()
 	req.Header.Set("Accept", "application/json, text/plain, */*")
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Requested-With", "XMLHttpRequest")
-	req.Header.Set("X-Domain", "copilot.tencent.com")
+	req.Header.Set("X-Domain", a.env.AuthStateXDomain)
 	req.Header.Set("X-No-Authorization", "true")
 	req.Header.Set("X-No-User-Id", "true")
 	req.Header.Set("X-No-Enterprise-Id", "true")
@@ -114,7 +230,7 @@ requestID := uuid.NewString()
 
 	return &AuthState{
 		State:   result.Data.State,
-		AuthURL: result.Data.AuthURL,
+		AuthURL: rewriteLoginURL(result.Data.AuthURL, a.env.LoginURLBase),
 	}, nil
 }
 
@@ -158,7 +274,7 @@ func (a *CodeBuddyAuth) doPollRequest(ctx context.Context, pollURL string) ([]by
 // PollForToken polls until the user completes browser authorization and returns auth data.
 func (a *CodeBuddyAuth) PollForToken(ctx context.Context, state string) (*CodeBuddyTokenStorage, error) {
 	deadline := time.Now().Add(maxPollDuration)
-	pollURL := fmt.Sprintf("%s%s?state=%s", a.baseURL, codeBuddyTokenPath, url.QueryEscape(state))
+	pollURL := fmt.Sprintf("%s%s?state=%s", a.env.BaseURL, codeBuddyTokenPath, url.QueryEscape(state))
 
 	for time.Now().Before(deadline) {
 		select {
@@ -189,14 +305,22 @@ func (a *CodeBuddyAuth) PollForToken(ctx context.Context, state string) (*CodeBu
 				return nil, fmt.Errorf("%w: empty data in response", ErrTokenFetchFailed)
 			}
 			userID, _ := a.DecodeUserID(result.Data.AccessToken)
+			domain := result.Data.Domain
+			if domain == "" {
+				domain = a.env.DefaultDomain
+			}
 			return &CodeBuddyTokenStorage{
 				AccessToken:  result.Data.AccessToken,
 				RefreshToken: result.Data.RefreshToken,
 				ExpiresIn:    result.Data.ExpiresIn,
 				TokenType:    result.Data.TokenType,
-				Domain:       result.Data.Domain,
+				Domain:       domain,
 				UserID:       userID,
 				Type:         "codebuddy",
+				Environment:  a.env.Environment,
+				BaseURL:      a.env.BaseURL,
+				ChatBaseURL:  a.env.ChatBaseURL,
+				LoginURLBase: a.env.LoginURLBase,
 			}, nil
 		case codeLoginPending:
 			// continue polling
@@ -235,9 +359,9 @@ func (a *CodeBuddyAuth) DecodeUserID(accessToken string) (string, error) {
 // It calls POST /v2/plugin/auth/token/refresh with the required headers.
 func (a *CodeBuddyAuth) RefreshToken(ctx context.Context, accessToken, refreshToken, userID, domain string) (*CodeBuddyTokenStorage, error) {
 	if domain == "" {
-		domain = DefaultDomain
+		domain = a.env.DefaultDomain
 	}
-	refreshURL := fmt.Sprintf("%s%s", a.baseURL, codeBuddyRefreshPath)
+	refreshURL := fmt.Sprintf("%s%s", a.env.BaseURL, codeBuddyRefreshPath)
 	body := []byte("{}")
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, refreshURL, bytes.NewReader(body))
@@ -320,6 +444,10 @@ func (a *CodeBuddyAuth) RefreshToken(ctx context.Context, accessToken, refreshTo
 		Domain:           tokenDomain,
 		UserID:           newUserID,
 		Type:             "codebuddy",
+		Environment:      a.env.Environment,
+		BaseURL:          a.env.BaseURL,
+		ChatBaseURL:      a.env.ChatBaseURL,
+		LoginURLBase:     a.env.LoginURLBase,
 	}, nil
 }
 
@@ -332,4 +460,57 @@ func (a *CodeBuddyAuth) applyPollHeaders(req *http.Request) {
 	req.Header.Set("X-No-Enterprise-Id", "true")
 	req.Header.Set("X-No-Department-Info", "true")
 	req.Header.Set("X-Product", "SaaS")
+}
+
+func rewriteLoginURL(rawURL, loginURLBase string) string {
+	if strings.TrimSpace(rawURL) == "" || strings.TrimSpace(loginURLBase) == "" {
+		return rawURL
+	}
+	target, err := url.Parse(rawURL)
+	if err != nil {
+		return rawURL
+	}
+	base, err := url.Parse(loginURLBase)
+	if err != nil || base.Scheme == "" || base.Host == "" {
+		return rawURL
+	}
+	target.Scheme = base.Scheme
+	target.Host = base.Host
+	return target.String()
+}
+
+func metaString(metadata map[string]any, key string) string {
+	if metadata == nil {
+		return ""
+	}
+	value, ok := metadata[key]
+	if !ok {
+		return ""
+	}
+	switch typed := value.(type) {
+	case string:
+		return strings.TrimSpace(typed)
+	case []byte:
+		return strings.TrimSpace(string(typed))
+	default:
+		return ""
+	}
+}
+
+func tokenIssuer(accessToken string) (string, error) {
+	parts := strings.Split(accessToken, ".")
+	if len(parts) < 2 {
+		return "", ErrJWTDecodeFailed
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return "", fmt.Errorf("%w: %v", ErrJWTDecodeFailed, err)
+	}
+	var claims struct {
+		Iss string `json:"iss"`
+	}
+	if err := json.Unmarshal(payload, &claims); err != nil {
+		return "", fmt.Errorf("%w: %v", ErrJWTDecodeFailed, err)
+	}
+	return strings.TrimSpace(claims.Iss), nil
 }

@@ -20,3 +20,25 @@ func TestDecodeUserID_ValidJWT(t *testing.T) {
 	}
 }
 
+func TestResolveEnvironmentConfigFromMetadata_InferInternationalFromDomain(t *testing.T) {
+	cfg := codebuddy.ResolveEnvironmentConfigFromMetadata(map[string]any{
+		"domain": "www.codebuddy.ai",
+	})
+	if cfg.Environment != codebuddy.EnvironmentInternational {
+		t.Fatalf("expected international environment, got %q", cfg.Environment)
+	}
+	if cfg.BaseURL != codebuddy.InternationalLoginURLBase {
+		t.Fatalf("expected international base URL, got %q", cfg.BaseURL)
+	}
+}
+
+func TestResolveEnvironmentConfigFromMetadata_InferInternationalFromIssuer(t *testing.T) {
+	token := "eyJhbGciOiJSUzI1NiJ9.eyJpc3MiOiJodHRwczovL3d3dy5jb2RlYnVkZHkuYWkvYXV0aC9yZWFsbXMvY29waWxvdCIsInN1YiI6InRlc3QtdXNlciJ9.sig"
+	cfg := codebuddy.ResolveEnvironmentConfigFromMetadata(map[string]any{
+		"access_token": token,
+	})
+	if cfg.Environment != codebuddy.EnvironmentInternational {
+		t.Fatalf("expected international environment, got %q", cfg.Environment)
+	}
+}
+

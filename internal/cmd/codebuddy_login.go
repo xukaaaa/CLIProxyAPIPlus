@@ -22,9 +22,13 @@ func DoCodeBuddyLogin(cfg *config.Config, options *LoginOptions) {
 	}
 
 	manager := newAuthManager()
+	metadata := map[string]string{}
+	if options.CodeBuddyRegion != "" {
+		metadata["environment"] = options.CodeBuddyRegion
+	}
 	authOpts := &sdkAuth.LoginOptions{
 		NoBrowser: options.NoBrowser,
-		Metadata:  map[string]string{},
+		Metadata:  metadata,
 	}
 
 	record, savedPath, err := manager.Login(context.Background(), "codebuddy", cfg, authOpts)

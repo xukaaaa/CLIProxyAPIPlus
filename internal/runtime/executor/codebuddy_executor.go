@@ -28,6 +28,12 @@ const (
 	codeBuddyAuthType = "codebuddy"
 )
 
+var supportedCodeBuddyModels = map[string]struct{}{
+	"gpt-5.4":   {},
+	"glm-5.0":   {},
+	"kimi-k2.5": {},
+}
+
 // CodeBuddyExecutor handles requests to the CodeBuddy API.
 type CodeBuddyExecutor struct {
 	cfg *config.Config
@@ -41,18 +47,33 @@ func NewCodeBuddyExecutor(cfg *config.Config) *CodeBuddyExecutor {
 // Identifier returns the unique identifier for this executor.
 func (e *CodeBuddyExecutor) Identifier() string { return codeBuddyAuthType }
 
-// codeBuddyCredentials extracts the access token and domain from auth metadata.
-func codeBuddyCredentials(auth *cliproxyauth.Auth) (accessToken, userID, domain string) {
+type codeBuddyCredentials struct {
+	AccessToken string
+	UserID      string
+	Domain      string
+	BaseURL     string
+	ChatBaseURL string
+	Environment string
+}
+
+// codeBuddyCredentials extracts auth and routing information from auth metadata.
+func resolveCodeBuddyCredentials(auth *cliproxyauth.Auth) codeBuddyCredentials {
 	if auth == nil {
-		return "", "", ""
+		return codeBuddyCredentials{}
 	}
-	accessToken = metaStringValue(auth.Metadata, "access_token")
-	userID = metaStringValue(auth.Metadata, "user_id")
-	domain = metaStringValue(auth.Metadata, "domain")
+	envCfg := codebuddy.ResolveEnvironmentConfigFromMetadata(auth.Metadata)
+	domain := metaStringValue(auth.Metadata, "domain")
 	if domain == "" {
-		domain = codebuddy.DefaultDomain
+		domain = envCfg.DefaultDomain
 	}
-	return
+	return codeBuddyCredentials{
+		AccessToken: metaStringValue(auth.Metadata, "access_token"),
+		UserID:      metaStringValue(auth.Metadata, "user_id"),
+		Domain:      domain,
+		BaseURL:     envCfg.BaseURL,
+		ChatBaseURL: envCfg.ChatBaseURL,
+		Environment: envCfg.Environment,
+	}
 }
 
 // PrepareRequest prepares the HTTP request before execution.
@@ -60,11 +81,14 @@ func (e *CodeBuddyExecutor) PrepareRequest(req *http.Request, auth *cliproxyauth
 	if req == nil {
 		return nil
 	}
-	accessToken, userID, domain := codeBuddyCredentials(auth)
-	if accessToken == "" {
+	if err := validateCodeBuddyHTTPRequest(req); err != nil {
+		return err
+	}
+	creds := resolveCodeBuddyCredentials(auth)
+	if creds.AccessToken == "" {
 		return fmt.Errorf("codebuddy: missing access token")
 	}
-	e.applyHeaders(req, accessToken, userID, domain)
+	e.applyHeaders(req, creds.AccessToken, creds.UserID, creds.Domain)
 	return nil
 }
 
@@ -85,14 +109,69 @@ func (e *CodeBuddyExecutor) HttpRequest(ctx context.Context, auth *cliproxyauth.
 }
 
 // Execute performs a non-streaming request.
+func validateCodeBuddyModel(model string) error {
+	if _, ok := supportedCodeBuddyModels[model]; ok {
+		return nil
+	}
+	return fmt.Errorf("codebuddy: unsupported model %q", model)
+}
+
+func validateCodeBuddyHTTPRequest(req *http.Request) error {
+	if req == nil || req.URL == nil {
+		return nil
+	}
+	if req.Method != http.MethodPost || req.URL.Path != codeBuddyChatPath {
+		return nil
+	}
+	body, restore, err := codeBuddyRequestBodyReader(req)
+	if err != nil {
+		return err
+	}
+	if body == nil {
+		return nil
+	}
+	defer restore()
+	var payload struct {
+		Model string `json:"model"`
+	}
+	if err := json.NewDecoder(body).Decode(&payload); err != nil {
+		return fmt.Errorf("codebuddy: decode request body: %w", err)
+	}
+	return validateCodeBuddyModel(strings.TrimSpace(payload.Model))
+}
+
+func codeBuddyRequestBodyReader(req *http.Request) (io.ReadCloser, func(), error) {
+	if req.GetBody != nil {
+		body, err := req.GetBody()
+		if err != nil {
+			return nil, nil, fmt.Errorf("codebuddy: read request body: %w", err)
+		}
+		return body, func() { _ = body.Close() }, nil
+	}
+	if req.Body == nil {
+		return nil, func() {}, nil
+	}
+	payload, err := io.ReadAll(req.Body)
+	if err != nil {
+		return nil, nil, fmt.Errorf("codebuddy: read request body: %w", err)
+	}
+	_ = req.Body.Close()
+	req.Body = io.NopCloser(bytes.NewReader(payload))
+	body := io.NopCloser(bytes.NewReader(payload))
+	return body, func() { _ = body.Close() }, nil
+}
+
 func (e *CodeBuddyExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
+	if err := validateCodeBuddyModel(baseModel); err != nil {
+		return resp, err
+	}
 
 	reporter := newUsageReporter(ctx, e.Identifier(), baseModel, auth)
 	defer reporter.trackFailure(ctx, &err)
 
-	accessToken, userID, domain := codeBuddyCredentials(auth)
-	if accessToken == "" {
+	creds := resolveCodeBuddyCredentials(auth)
+	if creds.AccessToken == "" {
 		return resp, fmt.Errorf("codebuddy: missing access token")
 	}
 
@@ -115,12 +194,12 @@ func (e *CodeBuddyExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth
 		return resp, err
 	}
 
-	url := codebuddy.BaseURL + codeBuddyChatPath
+	url := creds.ChatBaseURL + codeBuddyChatPath
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(translated))
 	if err != nil {
 		return resp, err
 	}
-	e.applyHeaders(httpReq, accessToken, userID, domain)
+	e.applyHeaders(httpReq, creds.AccessToken, creds.UserID, creds.Domain)
 	httpReq.Header.Set("Accept", "text/event-stream")
 	httpReq.Header.Set("Cache-Control", "no-cache")
 
@@ -186,12 +265,15 @@ func (e *CodeBuddyExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth
 // ExecuteStream performs a streaming request.
 func (e *CodeBuddyExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (_ *cliproxyexecutor.StreamResult, err error) {
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
+	if err := validateCodeBuddyModel(baseModel); err != nil {
+		return nil, err
+	}
 
 	reporter := newUsageReporter(ctx, e.Identifier(), baseModel, auth)
 	defer reporter.trackFailure(ctx, &err)
 
-	accessToken, userID, domain := codeBuddyCredentials(auth)
-	if accessToken == "" {
+	creds := resolveCodeBuddyCredentials(auth)
+	if creds.AccessToken == "" {
 		return nil, fmt.Errorf("codebuddy: missing access token")
 	}
 
@@ -212,12 +294,12 @@ func (e *CodeBuddyExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 		return nil, err
 	}
 
-	url := codebuddy.BaseURL + codeBuddyChatPath
+	url := creds.ChatBaseURL + codeBuddyChatPath
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(translated))
 	if err != nil {
 		return nil, err
 	}
-	e.applyHeaders(httpReq, accessToken, userID, domain)
+	e.applyHeaders(httpReq, creds.AccessToken, creds.UserID, creds.Domain)
 	httpReq.Header.Set("Accept", "text/event-stream")
 	httpReq.Header.Set("Cache-Control", "no-cache")
 
@@ -311,10 +393,10 @@ func (e *CodeBuddyExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth
 		return auth, nil
 	}
 
-	accessToken, userID, domain := codeBuddyCredentials(auth)
+	creds := resolveCodeBuddyCredentials(auth)
 
-	authSvc := codebuddy.NewCodeBuddyAuth(e.cfg)
-	storage, err := authSvc.RefreshToken(ctx, accessToken, refreshToken, userID, domain)
+	authSvc := codebuddy.NewCodeBuddyAuthFromMetadata(e.cfg, auth.Metadata)
+	storage, err := authSvc.RefreshToken(ctx, creds.AccessToken, refreshToken, creds.UserID, creds.Domain)
 	if err != nil {
 		return nil, fmt.Errorf("codebuddy: token refresh failed: %w", err)
 	}
@@ -326,6 +408,10 @@ func (e *CodeBuddyExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth
 	}
 	updated.Metadata["expires_in"] = storage.ExpiresIn
 	updated.Metadata["domain"] = storage.Domain
+	updated.Metadata["environment"] = storage.Environment
+	updated.Metadata["base_url"] = storage.BaseURL
+	updated.Metadata["chat_base_url"] = storage.ChatBaseURL
+	updated.Metadata["login_url_base"] = storage.LoginURLBase
 	if storage.UserID != "" {
 		updated.Metadata["user_id"] = storage.UserID
 	}

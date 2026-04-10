@@ -22,6 +22,9 @@ type LoginOptions struct {
 	// CallbackPort overrides the local OAuth callback port when set (>0).
 	CallbackPort int
 
+	// CodeBuddyRegion selects the CodeBuddy environment for login flows.
+	CodeBuddyRegion string
+
 	// Prompt allows the caller to provide interactive input when needed.
 	Prompt func(prompt string) (string, error)
 }

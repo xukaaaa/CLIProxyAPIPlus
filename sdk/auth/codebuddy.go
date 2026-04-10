@@ -46,8 +46,18 @@ func (a CodeBuddyAuthenticator) Login(ctx context.Context, cfg *config.Config, o
 		ctx = context.Background()
 	}
 
-	authSvc := codebuddy.NewCodeBuddyAuth(cfg)
+	environment := codebuddy.EnvironmentMainland
+	if opts.Metadata != nil {
+		if selected := opts.Metadata[codebuddy.MetadataEnvironment]; selected != "" {
+			parsed, err := codebuddy.ParseEnvironment(selected)
+			if err != nil {
+				return nil, err
+			}
+			environment = parsed
+		}
+	}
 
+	authSvc := codebuddy.NewCodeBuddyAuthForEnvironment(cfg, environment)
 	authState, err := authSvc.FetchAuthState(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("codebuddy: failed to fetch auth state: %w", err)
@@ -85,11 +95,15 @@ func (a CodeBuddyAuthenticator) Login(ctx context.Context, cfg *config.Config, o
 		Label:    label,
 		Storage:  storage,
 		Metadata: map[string]any{
-			"access_token":  storage.AccessToken,
-			"refresh_token": storage.RefreshToken,
-			"user_id":       storage.UserID,
-			"domain":        storage.Domain,
-			"expires_in":    storage.ExpiresIn,
+			"access_token":    storage.AccessToken,
+			"refresh_token":   storage.RefreshToken,
+			"user_id":         storage.UserID,
+			"domain":          storage.Domain,
+			"expires_in":      storage.ExpiresIn,
+			"environment":     storage.Environment,
+			"base_url":        storage.BaseURL,
+			"chat_base_url":   storage.ChatBaseURL,
+			"login_url_base":  storage.LoginURLBase,
 		},
 	}, nil
 }

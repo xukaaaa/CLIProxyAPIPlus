@@ -11,9 +11,13 @@ import (
 
 // newTestAuth creates a CodeBuddyAuth pointing at the given test server.
 func newTestAuth(serverURL string) *CodeBuddyAuth {
+	env := ResolveEnvironmentConfig(EnvironmentMainland)
+	env.BaseURL = serverURL
+	env.ChatBaseURL = serverURL
+	env.LoginURLBase = ""
 	return &CodeBuddyAuth{
 		httpClient: http.DefaultClient,
-		baseURL:    serverURL,
+		env:        env,
 	}
 }
 
@@ -28,41 +32,86 @@ func fakeJWT(sub string) string {
 // --- FetchAuthState tests ---
 
 func TestFetchAuthState_Success(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			t.Errorf("expected POST, got %s", r.Method)
-		}
-		if got := r.URL.Path; got != codeBuddyStatePath {
-			t.Errorf("expected path %s, got %s", codeBuddyStatePath, got)
-		}
-		if got := r.URL.Query().Get("platform"); got != "CLI" {
-			t.Errorf("expected platform=CLI, got %s", got)
-		}
-		if got := r.Header.Get("User-Agent"); got != UserAgent {
-			t.Errorf("expected User-Agent %s, got %s", UserAgent, got)
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"code": 0,
-			"msg":  "ok",
-			"data": map[string]any{
-				"state":   "test-state-abc",
-				"authUrl": "https://example.com/login?state=test-state-abc",
+	tests := []struct {
+		name            string
+		auth            *CodeBuddyAuth
+		expectedXDomain string
+		expectedAuthURL string
+	}{
+		{
+			name:            "mainland",
+			auth:            newTestAuth(""),
+			expectedXDomain: "copilot.tencent.com",
+			expectedAuthURL: "https://example.com/login?state=test-state-abc",
+		},
+		{
+			name: "international",
+			auth: &CodeBuddyAuth{
+				httpClient: http.DefaultClient,
+				env: EnvironmentConfig{
+					Environment:      EnvironmentInternational,
+					BaseURL:          "",
+					ChatBaseURL:      "",
+					LoginURLBase:     InternationalLoginURLBase,
+					DefaultDomain:    InternationalDomain,
+					AuthStateXDomain: InternationalDomain,
+				},
 			},
-		})
-	}))
-	defer srv.Close()
+			expectedXDomain: InternationalDomain,
+			expectedAuthURL: "https://www.codebuddy.ai/login?state=test-state-abc",
+		},
+	}
 
-	auth := newTestAuth(srv.URL)
-	result, err := auth.FetchAuthState(context.Background())
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if result.State != "test-state-abc" {
-		t.Errorf("expected state 'test-state-abc', got '%s'", result.State)
-	}
-	if result.AuthURL != "https://example.com/login?state=test-state-abc" {
-		t.Errorf("unexpected authURL: %s", result.AuthURL)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodPost {
+					t.Errorf("expected POST, got %s", r.Method)
+				}
+				if got := r.URL.Path; got != codeBuddyStatePath {
+					t.Errorf("expected path %s, got %s", codeBuddyStatePath, got)
+				}
+				if got := r.URL.Query().Get("platform"); got != "CLI" {
+					t.Errorf("expected platform=CLI, got %s", got)
+				}
+				if got := r.Header.Get("User-Agent"); got != UserAgent {
+					t.Errorf("expected User-Agent %s, got %s", UserAgent, got)
+				}
+				if got := r.Header.Get("X-Domain"); got != tt.expectedXDomain {
+					t.Errorf("expected X-Domain %s, got %s", tt.expectedXDomain, got)
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"code": 0,
+					"msg":  "ok",
+					"data": map[string]any{
+						"state":   "test-state-abc",
+						"authUrl": "https://example.com/login?state=test-state-abc",
+					},
+				})
+			}))
+			defer srv.Close()
+
+			if tt.auth.env.BaseURL == "" {
+				tt.auth.env.BaseURL = srv.URL
+			}
+			if tt.auth.env.ChatBaseURL == "" {
+				tt.auth.env.ChatBaseURL = srv.URL
+			}
+			if tt.name == "international" && tt.auth.env.LoginURLBase == "" {
+				tt.auth.env.LoginURLBase = srv.URL
+			}
+			result, err := tt.auth.FetchAuthState(context.Background())
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if result.State != "test-state-abc" {
+				t.Errorf("expected state 'test-state-abc', got '%s'", result.State)
+			}
+			if result.AuthURL != tt.expectedAuthURL {
+				t.Errorf("unexpected authURL: %s", result.AuthURL)
+			}
+		})
 	}
 }
 
@@ -184,30 +233,67 @@ func TestRefreshToken_Success(t *testing.T) {
 }
 
 func TestRefreshToken_DefaultDomain(t *testing.T) {
-	var receivedDomain string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		receivedDomain = r.Header.Get("X-Domain")
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"code": 0,
-			"msg":  "ok",
-			"data": map[string]any{
-				"accessToken":  fakeJWT("user-1"),
-				"refreshToken": "rt",
-				"expiresIn":    3600,
-				"tokenType":    "bearer",
-				"domain":       DefaultDomain,
+	tests := []struct {
+		name           string
+		auth           *CodeBuddyAuth
+		expectedDomain string
+		responseDomain string
+	}{
+		{
+			name:           "mainland fallback",
+			auth:           newTestAuth(""),
+			expectedDomain: DefaultDomain,
+			responseDomain: DefaultDomain,
+		},
+		{
+			name: "international fallback",
+			auth: &CodeBuddyAuth{
+				httpClient: http.DefaultClient,
+				env: EnvironmentConfig{
+					Environment:      EnvironmentInternational,
+					BaseURL:          "",
+					ChatBaseURL:      "",
+					LoginURLBase:     InternationalLoginURLBase,
+					DefaultDomain:    InternationalDomain,
+					AuthStateXDomain: InternationalDomain,
+				},
 			},
-		})
-	}))
-	defer srv.Close()
-
-	auth := newTestAuth(srv.URL)
-	_, err := auth.RefreshToken(context.Background(), "at", "rt", "uid", "")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+			expectedDomain: InternationalDomain,
+			responseDomain: InternationalDomain,
+		},
 	}
-	if receivedDomain != DefaultDomain {
-		t.Errorf("expected default domain '%s', got '%s'", DefaultDomain, receivedDomain)
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var receivedDomain string
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				receivedDomain = r.Header.Get("X-Domain")
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"code": 0,
+					"msg":  "ok",
+					"data": map[string]any{
+						"accessToken":  fakeJWT("user-1"),
+						"refreshToken": "rt",
+						"expiresIn":    3600,
+						"tokenType":    "bearer",
+						"domain":       tt.responseDomain,
+					},
+				})
+			}))
+			defer srv.Close()
+
+			tt.auth.env.BaseURL = srv.URL
+			if tt.auth.env.ChatBaseURL == "" {
+				tt.auth.env.ChatBaseURL = srv.URL
+			}
+			_, err := tt.auth.RefreshToken(context.Background(), "at", "rt", "uid", "")
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if receivedDomain != tt.expectedDomain {
+				t.Errorf("expected default domain '%s', got '%s'", tt.expectedDomain, receivedDomain)
+			}
+		})
 	}
 }
 

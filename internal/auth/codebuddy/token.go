@@ -30,6 +30,14 @@ type CodeBuddyTokenStorage struct {
 	Domain string `json:"domain"`
 	// UserID is the user ID associated with this token.
 	UserID string `json:"user_id"`
+	// Environment is the selected CodeBuddy environment.
+	Environment string `json:"environment,omitempty"`
+	// BaseURL is the auth/refresh API base URL used for this credential.
+	BaseURL string `json:"base_url,omitempty"`
+	// ChatBaseURL is the chat completions API base URL used for this credential.
+	ChatBaseURL string `json:"chat_base_url,omitempty"`
+	// LoginURLBase is the browser login origin used for this credential.
+	LoginURLBase string `json:"login_url_base,omitempty"`
 	// Type indicates the authentication provider type, always "codebuddy" for this storage.
 	Type string `json:"type"`
 }

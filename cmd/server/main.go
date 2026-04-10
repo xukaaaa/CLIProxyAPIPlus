@@ -18,6 +18,7 @@ import (
 
 	"github.com/joho/godotenv"
 	configaccess "github.com/router-for-me/CLIProxyAPI/v6/internal/access/config_access"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/codebuddy"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/kiro"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/buildinfo"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/cmd"
@@ -97,6 +98,7 @@ func main() {
 	var kiroIDCFlow string
 	var githubCopilotLogin bool
 	var codeBuddyLogin bool
+	var codeBuddyRegion string
 	var projectID string
 	var vertexImport string
 	var vertexImportPrefix string
@@ -137,6 +139,7 @@ func main() {
 	flag.StringVar(&kiroIDCFlow, "kiro-idc-flow", "", "IDC flow type: authcode (default) or device")
 	flag.BoolVar(&githubCopilotLogin, "github-copilot-login", false, "Login to GitHub Copilot using device flow")
 	flag.BoolVar(&codeBuddyLogin, "codebuddy-login", false, "Login to CodeBuddy using browser OAuth flow")
+	flag.StringVar(&codeBuddyRegion, "codebuddy-region", codebuddy.EnvironmentMainland, "CodeBuddy environment: mainland or international")
 	flag.StringVar(&projectID, "project_id", "", "Project ID (Gemini only, not required)")
 	flag.StringVar(&configPath, "config", DefaultConfigPath, "Configure File Path")
 	flag.StringVar(&vertexImport, "vertex-import", "", "Import Vertex service account key JSON file")
@@ -509,10 +512,17 @@ func main() {
 	}
 	managementasset.SetCurrentConfig(cfg)
 
+	selectedCodeBuddyRegion, err := codebuddy.ParseEnvironment(codeBuddyRegion)
+	if err != nil {
+		log.Error(err)
+		return
+	}
+
 	// Create login options to be used in authentication flows.
 	options := &cmd.LoginOptions{
-		NoBrowser:    noBrowser,
-		CallbackPort: oauthCallbackPort,
+		NoBrowser:      noBrowser,
+		CallbackPort:   oauthCallbackPort,
+		CodeBuddyRegion: selectedCodeBuddyRegion,
 	}
 
 	// Register the shared token store once so all components use the same persistence backend.
