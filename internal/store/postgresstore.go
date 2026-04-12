@@ -29,9 +29,12 @@ const (
 	defaultAuthTable   = "auth_store"
 	defaultConfigKey   = "config"
 
-	// pgNotifyChannel is the PostgreSQL LISTEN/NOTIFY channel used to propagate
+	// pgAuthNotifyChannel is the PostgreSQL LISTEN/NOTIFY channel used to propagate
 	// auth changes across instances sharing the same database.
-	pgNotifyChannel = "auth_changes"
+	pgAuthNotifyChannel = "auth_changes"
+	// pgConfigNotifyChannel is the PostgreSQL LISTEN/NOTIFY channel used to propagate
+	// full config blob changes across instances sharing the same database.
+	pgConfigNotifyChannel = "config_changes"
 
 	// listenerReconnectMin and listenerReconnectMax define exponential backoff
 	// bounds for the LISTEN connection reconnect loop.
@@ -73,6 +76,17 @@ type PostgresStore struct {
 	// from pushing them back to the database after syncInProgress has been cleared.
 	recentRemoteSyncsMu sync.Mutex
 	recentRemoteSyncs   map[string]time.Time
+
+	// configSyncInProgress is set while the store is applying a remote config blob
+	// to the local spool file. PersistConfig checks this flag to avoid writing the
+	// same change back to the database via the file watcher.
+	configSyncInProgress atomic.Int32
+	// recentRemoteConfigHash stores the last config blob hash applied from a remote
+	// instance so delayed watcher persists can be skipped after the in-progress flag clears.
+	recentRemoteConfigMu      sync.Mutex
+	recentRemoteConfigHash    string
+	recentRemoteConfigAt      time.Time
+	recentRemoteConfigDeleted bool
 
 	// onRemoteChange is an optional callback invoked after the listener applies a
 	// remote change to the local spool directory.  The watcher registers this to
@@ -456,12 +470,25 @@ func (s *PostgresStore) PersistConfig(ctx context.Context) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	if s.configSyncInProgress.Load() == 1 {
+		log.Debug("postgres store: skipping config persist during remote config sync")
+		return nil
+	}
+
 	data, err := os.ReadFile(s.configPath)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
+			if s.isRecentRemoteConfigDelete() {
+				log.Debug("postgres store: skipping recently synced config delete")
+				return nil
+			}
 			return s.deleteConfigRecord(ctx)
 		}
 		return fmt.Errorf("postgres store: read config file: %w", err)
+	}
+	if s.isRecentRemoteConfig(data) {
+		log.Debug("postgres store: skipping recently synced config blob")
+		return nil
 	}
 	return s.persistConfig(ctx, data)
 }
@@ -491,7 +518,7 @@ func (s *PostgresStore) syncConfigFromDatabase(ctx context.Context, exampleConfi
 		if errRead != nil {
 			return fmt.Errorf("postgres store: read local config: %w", errRead)
 		}
-		if errPersist := s.persistConfig(ctx, data); errPersist != nil {
+		if errPersist := s.persistConfigBlob(ctx, data, false); errPersist != nil {
 			return errPersist
 		}
 	case err != nil:
@@ -586,7 +613,7 @@ func (s *PostgresStore) persistAuth(ctx context.Context, relID string, data []by
 	if _, err := s.db.ExecContext(ctx, query, relID, jsonPayload); err != nil {
 		return fmt.Errorf("postgres store: upsert auth record: %w", err)
 	}
-	s.notifyChange(ctx, "upsert", relID)
+	s.notifyChange(ctx, pgAuthNotifyChannel, "upsert", relID)
 	return nil
 }
 
@@ -595,11 +622,15 @@ func (s *PostgresStore) deleteAuthRecord(ctx context.Context, relID string) erro
 	if _, err := s.db.ExecContext(ctx, query, relID); err != nil {
 		return fmt.Errorf("postgres store: delete auth record: %w", err)
 	}
-	s.notifyChange(ctx, "delete", relID)
+	s.notifyChange(ctx, pgAuthNotifyChannel, "delete", relID)
 	return nil
 }
 
 func (s *PostgresStore) persistConfig(ctx context.Context, data []byte) error {
+	return s.persistConfigBlob(ctx, data, true)
+}
+
+func (s *PostgresStore) persistConfigBlob(ctx context.Context, data []byte, notify bool) error {
 	query := fmt.Sprintf(`
 		INSERT INTO %s (id, content, created_at, updated_at)
 		VALUES ($1, $2, NOW(), NOW())
@@ -610,6 +641,9 @@ func (s *PostgresStore) persistConfig(ctx context.Context, data []byte) error {
 	if _, err := s.db.ExecContext(ctx, query, defaultConfigKey, normalized); err != nil {
 		return fmt.Errorf("postgres store: upsert config: %w", err)
 	}
+	if notify {
+		s.notifyChange(ctx, pgConfigNotifyChannel, "upsert", defaultConfigKey)
+	}
 	return nil
 }
 
@@ -618,6 +652,7 @@ func (s *PostgresStore) deleteConfigRecord(ctx context.Context) error {
 	if _, err := s.db.ExecContext(ctx, query, defaultConfigKey); err != nil {
 		return fmt.Errorf("postgres store: delete config: %w", err)
 	}
+	s.notifyChange(ctx, pgConfigNotifyChannel, "delete", defaultConfigKey)
 	return nil
 }
 
@@ -707,17 +742,17 @@ type notifyPayload struct {
 	Origin string `json:"origin"`
 }
 
-// notifyChange sends a pg_notify on the auth_changes channel.  The payload
-// includes the operation, affected auth ID and the local machineID so that
-// the listener on the same instance can skip self-originated notifications.
-func (s *PostgresStore) notifyChange(ctx context.Context, op, relID string) {
+// notifyChange sends a pg_notify on the given channel. The payload includes the
+// operation, affected identifier and the local machineID so that the listener on
+// the same instance can skip self-originated notifications.
+func (s *PostgresStore) notifyChange(ctx context.Context, channel, op, relID string) {
 	payload := notifyPayload{Op: op, ID: relID, Origin: s.machineID}
 	raw, err := json.Marshal(payload)
 	if err != nil {
 		log.Errorf("postgres store: marshal notify payload: %v", err)
 		return
 	}
-	if _, err = s.db.ExecContext(ctx, "SELECT pg_notify($1, $2)", pgNotifyChannel, string(raw)); err != nil {
+	if _, err = s.db.ExecContext(ctx, "SELECT pg_notify($1, $2)", channel, string(raw)); err != nil {
 		log.Errorf("postgres store: pg_notify: %v", err)
 	}
 }
@@ -760,6 +795,53 @@ func (s *PostgresStore) isRecentRemoteSync(relID string) bool {
 	}
 	s.recentRemoteSyncsMu.Unlock()
 	return ok
+}
+
+func (s *PostgresStore) markRecentRemoteConfig(data []byte) {
+	s.recentRemoteConfigMu.Lock()
+	s.recentRemoteConfigHash = fileContentHash(data)
+	s.recentRemoteConfigAt = time.Now()
+	s.recentRemoteConfigDeleted = false
+	s.recentRemoteConfigMu.Unlock()
+}
+
+func (s *PostgresStore) markRecentRemoteConfigDelete() {
+	s.recentRemoteConfigMu.Lock()
+	s.recentRemoteConfigHash = ""
+	s.recentRemoteConfigAt = time.Now()
+	s.recentRemoteConfigDeleted = true
+	s.recentRemoteConfigMu.Unlock()
+}
+
+func (s *PostgresStore) isRecentRemoteConfig(data []byte) bool {
+	hash := fileContentHash(data)
+	s.recentRemoteConfigMu.Lock()
+	defer s.recentRemoteConfigMu.Unlock()
+	if s.recentRemoteConfigHash == "" {
+		return false
+	}
+	if time.Since(s.recentRemoteConfigAt) > recentSyncTTL {
+		s.recentRemoteConfigHash = ""
+		s.recentRemoteConfigAt = time.Time{}
+		s.recentRemoteConfigDeleted = false
+		return false
+	}
+	return s.recentRemoteConfigHash == hash
+}
+
+func (s *PostgresStore) isRecentRemoteConfigDelete() bool {
+	s.recentRemoteConfigMu.Lock()
+	defer s.recentRemoteConfigMu.Unlock()
+	if !s.recentRemoteConfigDeleted {
+		return false
+	}
+	if time.Since(s.recentRemoteConfigAt) > recentSyncTTL {
+		s.recentRemoteConfigHash = ""
+		s.recentRemoteConfigAt = time.Time{}
+		s.recentRemoteConfigDeleted = false
+		return false
+	}
+	return true
 }
 
 // ---------------------------------------------------------------------------
@@ -845,7 +927,40 @@ func (s *PostgresStore) incrementalSyncAuth(ctx context.Context) error {
 	return nil
 }
 
-// applySingleRemoteChange handles a single notification from another instance.
+func (s *PostgresStore) incrementalSyncConfig(ctx context.Context) error {
+	query := fmt.Sprintf("SELECT content FROM %s WHERE id = $1", s.fullTableName(s.cfg.ConfigTable))
+	var content string
+	err := s.db.QueryRowContext(ctx, query, defaultConfigKey).Scan(&content)
+	s.configSyncInProgress.Store(1)
+	defer s.configSyncInProgress.Store(0)
+
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		if errRemove := os.Remove(s.configPath); errRemove != nil && !errors.Is(errRemove, fs.ErrNotExist) {
+			return fmt.Errorf("postgres store: incremental config remove: %w", errRemove)
+		}
+		s.markRecentRemoteConfigDelete()
+		return nil
+	case err != nil:
+		return fmt.Errorf("postgres store: incremental config query: %w", err)
+	default:
+		normalized := normalizeLineEndings(content)
+		if errMkdir := os.MkdirAll(filepath.Dir(s.configPath), 0o700); errMkdir != nil {
+			return fmt.Errorf("postgres store: incremental config mkdir: %w", errMkdir)
+		}
+		existing, errRead := os.ReadFile(s.configPath)
+		if errRead == nil && fileContentHash(existing) == fileContentHash([]byte(normalized)) {
+			return nil
+		}
+		if errWrite := os.WriteFile(s.configPath, []byte(normalized), 0o600); errWrite != nil {
+			return fmt.Errorf("postgres store: incremental config write: %w", errWrite)
+		}
+		s.markRecentRemoteConfig([]byte(normalized))
+		return nil
+	}
+}
+
+// applySingleRemoteChange handles a single auth notification from another instance.
 func (s *PostgresStore) applySingleRemoteChange(ctx context.Context, payload notifyPayload) {
 	s.syncInProgress.Store(1)
 	defer s.syncInProgress.Store(0)
@@ -887,6 +1002,45 @@ func (s *PostgresStore) applySingleRemoteChange(ctx context.Context, payload not
 
 	default:
 		log.Warnf("postgres store: unknown remote op %q for %s", payload.Op, payload.ID)
+	}
+}
+
+func (s *PostgresStore) applyRemoteConfigChange(ctx context.Context, payload notifyPayload) {
+	s.configSyncInProgress.Store(1)
+	defer s.configSyncInProgress.Store(0)
+
+	switch payload.Op {
+	case "delete":
+		if err := os.Remove(s.configPath); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			log.Errorf("postgres store: remote delete config: %v", err)
+		}
+		s.markRecentRemoteConfigDelete()
+	case "upsert":
+		query := fmt.Sprintf("SELECT content FROM %s WHERE id = $1", s.fullTableName(s.cfg.ConfigTable))
+		var content string
+		if err := s.db.QueryRowContext(ctx, query, defaultConfigKey).Scan(&content); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				if errRemove := os.Remove(s.configPath); errRemove != nil && !errors.Is(errRemove, fs.ErrNotExist) {
+					log.Errorf("postgres store: remote config remove after missing row: %v", errRemove)
+				}
+				return
+			}
+			log.Errorf("postgres store: remote config fetch: %v", err)
+			return
+		}
+		if err := os.MkdirAll(filepath.Dir(s.configPath), 0o700); err != nil {
+			log.Errorf("postgres store: remote config mkdir: %v", err)
+			return
+		}
+		normalized := normalizeLineEndings(content)
+		if err := os.WriteFile(s.configPath, []byte(normalized), 0o600); err != nil {
+			log.Errorf("postgres store: remote config write: %v", err)
+			return
+		}
+		s.markRecentRemoteConfig([]byte(normalized))
+		log.Infof("postgres store: applied remote config upsert")
+	default:
+		log.Warnf("postgres store: unknown remote config op %q", payload.Op)
 	}
 }
 
@@ -969,8 +1123,19 @@ func (s *PostgresStore) listenLoop(ctx context.Context) {
 			continue
 		}
 
-		if _, err = conn.Exec(ctx, fmt.Sprintf("LISTEN %s", pgNotifyChannel)); err != nil {
-			log.Errorf("postgres store: LISTEN: %v", err)
+		if _, err = conn.Exec(ctx, fmt.Sprintf("LISTEN %s", pgAuthNotifyChannel)); err != nil {
+			log.Errorf("postgres store: LISTEN auth: %v", err)
+			_ = conn.Close(ctx)
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(backoff):
+			}
+			backoff = minDuration(backoff*2, listenerReconnectMax)
+			continue
+		}
+		if _, err = conn.Exec(ctx, fmt.Sprintf("LISTEN %s", pgConfigNotifyChannel)); err != nil {
+			log.Errorf("postgres store: LISTEN config: %v", err)
 			_ = conn.Close(ctx)
 			select {
 			case <-ctx.Done():
@@ -986,6 +1151,9 @@ func (s *PostgresStore) listenLoop(ctx context.Context) {
 		backoff = listenerReconnectMin
 		if err = s.incrementalSyncAuth(ctx); err != nil {
 			log.Errorf("postgres store: incremental sync after reconnect: %v", err)
+		}
+		if err = s.incrementalSyncConfig(ctx); err != nil {
+			log.Errorf("postgres store: config sync after reconnect: %v", err)
 		}
 
 		// Block waiting for notifications until the connection is lost.
@@ -1016,8 +1184,15 @@ func (s *PostgresStore) waitForNotifications(ctx context.Context, conn *pgx.Conn
 			continue
 		}
 
-		log.Debugf("postgres store: received remote %s for %s from %s", payload.Op, payload.ID, payload.Origin)
-		s.applySingleRemoteChange(ctx, payload)
+		log.Debugf("postgres store: received remote %s for %s from %s on %s", payload.Op, payload.ID, payload.Origin, notification.Channel)
+		switch notification.Channel {
+		case pgAuthNotifyChannel:
+			s.applySingleRemoteChange(ctx, payload)
+		case pgConfigNotifyChannel:
+			s.applyRemoteConfigChange(ctx, payload)
+		default:
+			log.Warnf("postgres store: unknown notification channel %q", notification.Channel)
+		}
 	}
 }
 
