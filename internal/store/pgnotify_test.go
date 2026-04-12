@@ -36,10 +36,11 @@ func TestListenNotifyIntegration(t *testing.T) {
 		testRawListenNotify(t, ctx, dsn)
 	})
 
-	// Create a unique table name per test run to avoid collisions.
-	tableName := fmt.Sprintf("test_auth_%d", time.Now().UnixNano())
+	// Create unique table names per test run to avoid collisions.
+	authTableName := fmt.Sprintf("test_auth_%d", time.Now().UnixNano())
+	configTableName := fmt.Sprintf("test_config_%d", time.Now().UnixNano())
 
-	storeA, storeB, cleanup := setupTwoStores(t, ctx, dsn, tableName)
+	storeA, storeB, cleanup := setupTwoStores(t, ctx, dsn, authTableName, configTableName)
 	defer cleanup()
 
 	t.Run("UpsertAtoB", func(t *testing.T) {
@@ -72,6 +73,22 @@ func TestListenNotifyIntegration(t *testing.T) {
 
 	t.Run("FeedbackLoopPrevention", func(t *testing.T) {
 		testFeedbackLoopPrevention(t, ctx, storeA, storeB)
+	})
+
+	t.Run("ConfigUpsertAtoB", func(t *testing.T) {
+		testConfigUpsertAtoB(t, ctx, storeA, storeB)
+	})
+
+	t.Run("ConfigFeedbackLoopPrevention", func(t *testing.T) {
+		testConfigFeedbackLoopPrevention(t, ctx, storeA, storeB)
+	})
+
+	t.Run("ConfigDelayedWatcherAfterSyncReset", func(t *testing.T) {
+		testConfigDelayedWatcherAfterSyncReset(t, ctx, storeA, storeB)
+	})
+
+	t.Run("ConfigIncrementalSyncOnReconnect", func(t *testing.T) {
+		testConfigIncrementalSyncOnReconnect(t, ctx, storeA, storeB)
 	})
 
 	t.Run("SelfNotificationSkip", func(t *testing.T) {
@@ -121,8 +138,10 @@ func TestPostgresStoreSaveStorageAuthWithoutMetadataSetterPersistsDisabled(t *te
 	defer cancel()
 
 	tableName := fmt.Sprintf("test_auth_save_disabled_nometa_%d", time.Now().UnixNano())
+	schemaName := fmt.Sprintf("claude_config_sync_%d", time.Now().UnixNano())
 	pg, err := NewPostgresStore(ctx, PostgresStoreConfig{
 		DSN:       dsn,
+		Schema:    schemaName,
 		AuthTable: tableName,
 		SpoolDir:  filepath.Join(t.TempDir(), "pgstore"),
 	})
@@ -130,7 +149,7 @@ func TestPostgresStoreSaveStorageAuthWithoutMetadataSetterPersistsDisabled(t *te
 		t.Fatalf("store init: %v", err)
 	}
 	defer func() {
-		pg.db.ExecContext(context.Background(), fmt.Sprintf("DROP TABLE IF EXISTS %s", pg.fullTableName(tableName)))
+		pg.db.ExecContext(context.Background(), fmt.Sprintf("DROP SCHEMA IF EXISTS %s CASCADE", quoteIdentifier(schemaName)))
 		pg.Close()
 	}()
 	if err = pg.EnsureSchema(ctx); err != nil {
@@ -209,25 +228,30 @@ func (ts *testStore) clearChanges() {
 	ts.mu.Unlock()
 }
 
-func setupTwoStores(t *testing.T, ctx context.Context, dsn, tableName string) (a, b *testStore, cleanup func()) {
+func setupTwoStores(t *testing.T, ctx context.Context, dsn, authTableName, configTableName string) (a, b *testStore, cleanup func()) {
 	t.Helper()
 
 	tmpA := t.TempDir()
 	tmpB := t.TempDir()
+	schemaName := fmt.Sprintf("claude_config_sync_%d", time.Now().UnixNano())
 
 	pgA, err := NewPostgresStore(ctx, PostgresStoreConfig{
-		DSN:       dsn,
-		AuthTable: tableName,
-		SpoolDir:  filepath.Join(tmpA, "pgstore"),
+		DSN:         dsn,
+		Schema:      schemaName,
+		AuthTable:   authTableName,
+		ConfigTable: configTableName,
+		SpoolDir:    filepath.Join(tmpA, "pgstore"),
 	})
 	if err != nil {
 		t.Fatalf("storeA init: %v", err)
 	}
 
 	pgB, err := NewPostgresStore(ctx, PostgresStoreConfig{
-		DSN:       dsn,
-		AuthTable: tableName,
-		SpoolDir:  filepath.Join(tmpB, "pgstore"),
+		DSN:         dsn,
+		Schema:      schemaName,
+		AuthTable:   authTableName,
+		ConfigTable: configTableName,
+		SpoolDir:    filepath.Join(tmpB, "pgstore"),
 	})
 	if err != nil {
 		t.Fatalf("storeB init: %v", err)
@@ -261,14 +285,14 @@ func setupTwoStores(t *testing.T, ctx context.Context, dsn, tableName string) (a
 
 	t.Logf("storeA machine=%s  dir=%s", pgA.machineID, pgA.authDir)
 	t.Logf("storeB machine=%s  dir=%s", pgB.machineID, pgB.authDir)
-	t.Logf("shared table: %s", tableName)
+	t.Logf("test schema: %s", schemaName)
+	t.Logf("shared auth table: %s", authTableName)
+	t.Logf("shared config table: %s", configTableName)
 
 	cleanup = func() {
 		a.StopListener()
 		b.StopListener()
-		// Drop test table.
-		pgA.db.ExecContext(context.Background(),
-			fmt.Sprintf("DROP TABLE IF EXISTS %s", pgA.fullTableName(tableName)))
+		pgA.db.ExecContext(context.Background(), fmt.Sprintf("DROP SCHEMA IF EXISTS %s CASCADE", quoteIdentifier(schemaName)))
 		pgA.Close()
 		pgB.Close()
 	}
@@ -299,6 +323,19 @@ func waitForFileGone(t *testing.T, path string, timeout time.Duration) bool {
 	return false
 }
 
+func waitForFileContent(t *testing.T, path string, expected []byte, timeout time.Duration) bool {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		data, err := os.ReadFile(path)
+		if err == nil && string(data) == string(expected) {
+			return true
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	return false
+}
+
 func persistAuthLocked(t *testing.T, ctx context.Context, s *testStore, id string, content []byte) {
 	t.Helper()
 	s.PostgresStore.mu.Lock()
@@ -313,6 +350,22 @@ func persistAuthLocked(t *testing.T, ctx context.Context, s *testStore, id strin
 	}
 	if err := s.PostgresStore.persistAuth(ctx, id, content); err != nil {
 		t.Fatalf("persistAuth: %v", err)
+	}
+}
+
+func persistConfigLocked(t *testing.T, ctx context.Context, s *testStore, content []byte) {
+	t.Helper()
+	s.PostgresStore.mu.Lock()
+	defer s.PostgresStore.mu.Unlock()
+
+	if err := os.MkdirAll(filepath.Dir(s.configPath), 0o700); err != nil {
+		t.Fatalf("mkdir config: %v", err)
+	}
+	if err := os.WriteFile(s.configPath, content, 0o600); err != nil {
+		t.Fatalf("write config local: %v", err)
+	}
+	if err := s.PostgresStore.persistConfig(ctx, content); err != nil {
+		t.Fatalf("persistConfig: %v", err)
 	}
 }
 
@@ -541,7 +594,7 @@ func testFeedbackLoopPrevention(t *testing.T, ctx context.Context, a, b *testSto
 	}
 
 	// Now simulate: syncInProgress is set, watcher tries to PersistAuthFiles.
-	b.syncInProgress.Store(1)
+	b.configSyncInProgress.Store(1)
 
 	// Delete the DB record manually (simulate: if PersistAuthFiles runs, it
 	// would call deleteAuthRecord because file was just removed).
@@ -549,7 +602,7 @@ func testFeedbackLoopPrevention(t *testing.T, ctx context.Context, a, b *testSto
 	os.Remove(pathB)
 
 	err := b.PersistAuthFiles(ctx, "watcher-triggered", pathB)
-	b.syncInProgress.Store(0)
+	b.configSyncInProgress.Store(0)
 
 	if err != nil {
 		t.Fatalf("PersistAuthFiles returned error: %v", err)
@@ -569,6 +622,128 @@ func testFeedbackLoopPrevention(t *testing.T, ctx context.Context, a, b *testSto
 	// Cleanup.
 	deleteAuthLocked(t, ctx, a, "loop.json")
 	time.Sleep(2 * time.Second)
+}
+
+// ---------------------------------------------------------------------------
+// Test: config A upserts → B gets file
+// ---------------------------------------------------------------------------
+
+func testConfigUpsertAtoB(t *testing.T, ctx context.Context, a, b *testStore) {
+	content := []byte("debug: true\nrequest-retry: 9\n")
+	persistConfigLocked(t, ctx, a, content)
+
+	if !waitForFileContent(t, b.configPath, content, 5*time.Second) {
+		data, _ := os.ReadFile(b.configPath)
+		t.Fatalf("config did not sync to B; got %q want %q", string(data), string(content))
+	}
+	if hash := fileContentHash(content); hash == "" {
+		t.Fatal("expected non-empty config hash")
+	}
+	if b.configSyncInProgress.Load() != 0 {
+		t.Fatal("syncInProgress should be reset after config sync")
+	}
+	t.Log("Config A→B upsert ✓")
+}
+
+// ---------------------------------------------------------------------------
+// Test: config feedback loop prevention
+// ---------------------------------------------------------------------------
+
+func testConfigFeedbackLoopPrevention(t *testing.T, ctx context.Context, a, b *testStore) {
+	content := []byte("debug: true\nrequest-retry: 10\n")
+	persistConfigLocked(t, ctx, a, content)
+
+	if !waitForFileContent(t, b.configPath, content, 5*time.Second) {
+		t.Fatal("config did not sync to B")
+	}
+
+	b.configSyncInProgress.Store(1)
+	defer b.configSyncInProgress.Store(0)
+
+	if err := os.WriteFile(b.configPath, []byte("debug: false\nrequest-retry: 1\n"), 0o600); err != nil {
+		t.Fatalf("write local config: %v", err)
+	}
+	if err := b.PersistConfig(ctx); err != nil {
+		t.Fatalf("PersistConfig returned error: %v", err)
+	}
+
+	query := fmt.Sprintf("SELECT content FROM %s WHERE id = $1", b.fullTableName(b.cfg.ConfigTable))
+	var dbContent string
+	if err := b.db.QueryRowContext(ctx, query, defaultConfigKey).Scan(&dbContent); err != nil {
+		t.Fatalf("query config: %v", err)
+	}
+	if dbContent != string(content) {
+		t.Fatalf("config row changed during syncInProgress; got %q want %q", dbContent, string(content))
+	}
+	t.Log("Config feedback loop prevention ✓")
+}
+
+// ---------------------------------------------------------------------------
+// Test: delayed config watcher after sync reset
+// ---------------------------------------------------------------------------
+
+func testConfigDelayedWatcherAfterSyncReset(t *testing.T, ctx context.Context, a, b *testStore) {
+	content := []byte("debug: true\nrequest-retry: 11\n")
+	persistConfigLocked(t, ctx, a, content)
+
+	if !waitForFileContent(t, b.configPath, content, 5*time.Second) {
+		t.Fatal("config did not sync to B")
+	}
+	time.Sleep(500 * time.Millisecond)
+
+	if b.configSyncInProgress.Load() != 0 {
+		t.Fatal("syncInProgress should be 0 after remote config sync completes")
+	}
+
+	query := fmt.Sprintf("SELECT content FROM %s WHERE id = $1", b.fullTableName(b.cfg.ConfigTable))
+	if _, err := b.db.ExecContext(ctx, fmt.Sprintf("DELETE FROM %s WHERE id = $1", b.fullTableName(b.cfg.ConfigTable)), defaultConfigKey); err != nil {
+		t.Fatalf("delete config row: %v", err)
+	}
+	var count int
+	if err := b.db.QueryRowContext(ctx, fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE id = $1", b.fullTableName(b.cfg.ConfigTable)), defaultConfigKey).Scan(&count); err != nil {
+		t.Fatalf("count config row: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("expected 0 config rows after delete, got %d", count)
+	}
+
+	if err := b.PersistConfig(ctx); err != nil {
+		t.Fatalf("PersistConfig error: %v", err)
+	}
+
+	if err := b.db.QueryRowContext(ctx, fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE id = $1", b.fullTableName(b.cfg.ConfigTable)), defaultConfigKey).Scan(&count); err != nil {
+		t.Fatalf("recount config row: %v", err)
+	}
+	if count != 0 {
+		var dbContent string
+		_ = b.db.QueryRowContext(ctx, query, defaultConfigKey).Scan(&dbContent)
+		t.Fatalf("FEEDBACK LOOP: PersistConfig re-inserted remotely synced config into DB: %q", dbContent)
+	}
+	t.Log("Delayed config watcher after sync reset — correctly skipped ✓")
+}
+
+// ---------------------------------------------------------------------------
+// Test: config incremental sync on reconnect
+// ---------------------------------------------------------------------------
+
+func testConfigIncrementalSyncOnReconnect(t *testing.T, ctx context.Context, a, b *testStore) {
+	if err := os.WriteFile(b.configPath, []byte("debug: false\nrequest-retry: 2\n"), 0o600); err != nil {
+		t.Fatalf("seed B config: %v", err)
+	}
+	b.StopListener()
+
+	content := []byte("debug: true\nrequest-retry: 42\n")
+	persistConfigLocked(t, ctx, a, content)
+	if waitForFileContent(t, b.configPath, content, 1*time.Second) {
+		t.Fatal("B updated config before reconnect")
+	}
+
+	b.StartListener(ctx)
+	if !waitForFileContent(t, b.configPath, content, 8*time.Second) {
+		data, _ := os.ReadFile(b.configPath)
+		t.Fatalf("config did not catch up on reconnect; got %q want %q", string(data), string(content))
+	}
+	t.Log("Config incremental sync on reconnect ✓")
 }
 
 // ---------------------------------------------------------------------------
@@ -664,7 +839,7 @@ func testDelayedWatcherAfterSyncReset(t *testing.T, ctx context.Context, a, b *t
 	// Extra wait to ensure syncInProgress has been reset to 0 by defer.
 	time.Sleep(500 * time.Millisecond)
 
-	if b.syncInProgress.Load() != 0 {
+	if b.configSyncInProgress.Load() != 0 {
 		t.Fatal("syncInProgress should be 0 after remote sync completes")
 	}
 
