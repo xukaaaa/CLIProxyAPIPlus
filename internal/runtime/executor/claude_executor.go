@@ -927,14 +927,14 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 	}
 
 	// Merge extra betas from request body and request flags.
-	if len(extraBetas) > 0 || hasClaude1MHeader {
-		existingSet := make(map[string]bool)
-		for _, b := range strings.Split(baseBetas, ",") {
-			betaName := strings.TrimSpace(b)
-			if betaName != "" {
-				existingSet[betaName] = true
-			}
+	existingSet := make(map[string]bool)
+	for _, b := range strings.Split(baseBetas, ",") {
+		betaName := strings.TrimSpace(b)
+		if betaName != "" {
+			existingSet[betaName] = true
 		}
+	}
+	if len(extraBetas) > 0 {
 		for _, beta := range extraBetas {
 			beta = strings.TrimSpace(beta)
 			if beta != "" && !existingSet[beta] {
@@ -942,9 +942,9 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 				existingSet[beta] = true
 			}
 		}
-		if hasClaude1MHeader && !existingSet["context-1m-2025-08-07"] {
-			baseBetas += ",context-1m-2025-08-07"
-		}
+	}
+	if hasClaude1MHeader && !existingSet[gitLabContext1MBeta] {
+		baseBetas += "," + gitLabContext1MBeta
 	}
 	r.Header.Set("Anthropic-Beta", baseBetas)
 
