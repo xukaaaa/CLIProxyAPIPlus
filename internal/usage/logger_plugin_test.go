@@ -117,7 +117,7 @@ func TestRequestStatisticsRecordFallsBackToRouteAndFailureFromContext(t *testing
 		RequestedAt: time.Date(2026, 4, 8, 10, 8, 34, 0, time.UTC),
 		Source:      "source-a",
 		AuthIndex:   "auth-a",
-		Detail: coreusage.Detail{InputTokens: 10, OutputTokens: 20, TotalTokens: 30},
+		Detail:      coreusage.Detail{InputTokens: 10, OutputTokens: 20, TotalTokens: 30},
 	})
 
 	snapshot := stats.Snapshot()
