@@ -10,8 +10,8 @@ import (
 	"context"
 	"strings"
 
-	translatorcommon "github.com/router-for-me/CLIProxyAPI/v6/internal/translator/common"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
+	translatorcommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/common"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -238,34 +238,32 @@ func convertOpenAIStreamingChunkToAnthropic(rawJSON []byte, param *ConvertOpenAI
 					accumulator.ID = id.String()
 				}
 
-				// Handle function name
-				if function := toolCall.Get("function"); function.Exists() {
-					if name := function.Get("name"); name.Exists() {
-						mappedName := util.MapToolName(param.ToolNameMap, name.String())
-						if isValidToolCallName(mappedName) {
-							accumulator.Name = mappedName
+					// Handle function name
+					if function := toolCall.Get("function"); function.Exists() {
+						if name := function.Get("name"); name.Exists() && name.String() != "" {
+							mappedName := util.MapToolName(param.ToolNameMap, name.String())
+							if isValidToolCallName(mappedName) {
+								accumulator.Name = mappedName
 
-							stopThinkingContentBlock(param, &results)
+								stopThinkingContentBlock(param, &results)
+								stopTextContentBlock(param, &results)
 
-							stopTextContentBlock(param, &results)
-
-							// Send content_block_start for tool_use
-							contentBlockStartJSON := `{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"","name":"","input":{}}}`
-							contentBlockStartJSONBytes := []byte(contentBlockStartJSON)
-							contentBlockStartJSONBytes, _ = sjson.SetBytes(contentBlockStartJSONBytes, "index", blockIndex)
-							contentBlockStartJSONBytes, _ = sjson.SetBytes(contentBlockStartJSONBytes, "content_block.id", util.SanitizeClaudeToolID(accumulator.ID))
-							contentBlockStartJSONBytes, _ = sjson.SetBytes(contentBlockStartJSONBytes, "content_block.name", accumulator.Name)
-							results = append(results, translatorcommon.AppendSSEEventBytes(nil, "content_block_start", contentBlockStartJSONBytes, 2))
+								contentBlockStartJSON := `{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"","name":"","input":{}}}`
+								contentBlockStartJSONBytes := []byte(contentBlockStartJSON)
+								contentBlockStartJSONBytes, _ = sjson.SetBytes(contentBlockStartJSONBytes, "index", blockIndex)
+								contentBlockStartJSONBytes, _ = sjson.SetBytes(contentBlockStartJSONBytes, "content_block.id", util.SanitizeClaudeToolID(accumulator.ID))
+								contentBlockStartJSONBytes, _ = sjson.SetBytes(contentBlockStartJSONBytes, "content_block.name", accumulator.Name)
+								results = append(results, translatorcommon.AppendSSEEventBytes(nil, "content_block_start", contentBlockStartJSONBytes, 2))
+							}
 						}
-					}
 
-					// Handle function arguments
-					if args := function.Get("arguments"); args.Exists() {
-						argsText := args.String()
-						if argsText != "" {
-							accumulator.Arguments.WriteString(argsText)
+						// Handle function arguments
+						if args := function.Get("arguments"); args.Exists() {
+							argsText := args.String()
+							if argsText != "" {
+								accumulator.Arguments.WriteString(argsText)
+							}
 						}
-					}
 				}
 
 				return true

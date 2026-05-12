@@ -6,7 +6,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
 )
 
 // IFlowTokenStorage persists iFlow OAuth credentials alongside the derived API key.
@@ -22,17 +22,13 @@ type IFlowTokenStorage struct {
 	Cookie       string `json:"cookie"`
 	Type         string `json:"type"`
 
-	// Metadata holds arbitrary key-value pairs injected via hooks.
-	// It is not exported to JSON directly to allow flattening during serialization.
 	Metadata map[string]any `json:"-"`
 }
 
-// SetMetadata allows external callers to inject metadata into the storage before saving.
 func (ts *IFlowTokenStorage) SetMetadata(meta map[string]any) {
 	ts.Metadata = meta
 }
 
-// SaveTokenToFile serialises the token storage to disk.
 func (ts *IFlowTokenStorage) SaveTokenToFile(authFilePath string) error {
 	misc.LogSavingCredentials(authFilePath)
 	ts.Type = "iflow"
@@ -46,10 +42,9 @@ func (ts *IFlowTokenStorage) SaveTokenToFile(authFilePath string) error {
 	}
 	defer func() { _ = f.Close() }()
 
-	// Merge metadata using helper
-	data, errMerge := misc.MergeMetadata(ts, ts.Metadata)
-	if errMerge != nil {
-		return fmt.Errorf("failed to merge metadata: %w", errMerge)
+	data, err := misc.MergeMetadata(ts, ts.Metadata)
+	if err != nil {
+		return fmt.Errorf("failed to merge metadata: %w", err)
 	}
 
 	if err = json.NewEncoder(f).Encode(data); err != nil {

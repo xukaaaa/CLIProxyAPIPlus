@@ -8,7 +8,6 @@ import (
 	"strings"
 )
 
-// NormalizeCookie normalizes raw cookie strings for iFlow authentication flows.
 func NormalizeCookie(raw string) (string, error) {
 	trimmed := strings.TrimSpace(raw)
 	if trimmed == "" {
@@ -25,7 +24,6 @@ func NormalizeCookie(raw string) (string, error) {
 	return combined, nil
 }
 
-// SanitizeIFlowFileName normalizes user identifiers for safe filename usage.
 func SanitizeIFlowFileName(raw string) string {
 	if raw == "" {
 		return ""
@@ -40,7 +38,6 @@ func SanitizeIFlowFileName(raw string) string {
 	return strings.TrimSpace(result.String())
 }
 
-// ExtractBXAuth extracts the BXAuth value from a cookie string.
 func ExtractBXAuth(cookie string) string {
 	parts := strings.Split(cookie, ";")
 	for _, part := range parts {
@@ -52,8 +49,6 @@ func ExtractBXAuth(cookie string) string {
 	return ""
 }
 
-// CheckDuplicateBXAuth checks if the given BXAuth value already exists in any iflow auth file.
-// Returns the path of the existing file if found, empty string otherwise.
 func CheckDuplicateBXAuth(authDir, bxAuth string) (string, error) {
 	if bxAuth == "" {
 		return "", nil

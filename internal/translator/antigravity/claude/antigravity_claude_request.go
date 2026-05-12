@@ -8,10 +8,10 @@ package claude
 import (
 	"strings"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/cache"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/translator/gemini/common"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/cache"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/translator/gemini/common"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -101,6 +101,9 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 			systemTypePromptResult := systemPromptResult.Get("type")
 			if systemTypePromptResult.Type == gjson.String && systemTypePromptResult.String() == "text" {
 				systemPrompt := systemPromptResult.Get("text").String()
+				if strings.HasPrefix(systemPrompt, "x-anthropic-billing-header:") {
+					continue
+				}
 				partJSON := []byte(`{}`)
 				if systemPrompt != "" {
 					partJSON, _ = sjson.SetBytes(partJSON, "text", systemPrompt)
@@ -170,9 +173,15 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 							continue
 						}
 
-						// Valid signature, send as thought block
-						// Always include "text" field — Google Antigravity API requires it
-						// even for redacted thinking where the text is empty.
+						// Drop empty-text thinking blocks (redacted thinking from Claude Max).
+						// Antigravity wraps empty text into a prompt-caching-scope object that
+						// omits the required inner "thinking" field, causing:
+						//   400 "messages.N.content.0.thinking.thinking: Field required"
+						if thinkingText == "" {
+							continue
+						}
+
+						// Valid signature with content, send as thought block.
 						partJSON := []byte(`{}`)
 						partJSON, _ = sjson.SetBytes(partJSON, "thought", true)
 						partJSON, _ = sjson.SetBytes(partJSON, "text", thinkingText)
