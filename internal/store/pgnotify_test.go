@@ -11,9 +11,8 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/codebuddy"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/codex"
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/codex"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 )
 
 // TestListenNotifyIntegration verifies LISTEN/NOTIFY end-to-end against a real
@@ -159,14 +158,14 @@ func TestPostgresStoreSaveStorageAuthWithoutMetadataSetterPersistsDisabled(t *te
 	auth := &cliproxyauth.Auth{
 		ID:       "disabled-storage-nometa.json",
 		FileName: "disabled-storage-nometa.json",
-		Provider: "codebuddy",
+		Provider: "codex",
 		Disabled: true,
 		Status:   cliproxyauth.StatusDisabled,
-		Storage: &codebuddy.CodeBuddyTokenStorage{
+		Storage: &codex.CodexTokenStorage{
 			AccessToken:  "token",
 			RefreshToken: "refresh",
-			Domain:       "example.com",
-			UserID:       "user-1",
+			Email:        "user@example.com",
+			Type:         "codex",
 		},
 	}
 
