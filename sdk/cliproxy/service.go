@@ -29,6 +29,8 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
+const authPersistenceFlushTimeout = 5 * time.Second
+
 // Service wraps the proxy server lifecycle so external programs can embed the CLI proxy.
 // It manages the complete lifecycle including authentication, file watching, HTTP server,
 // and integration with various AI service providers.
@@ -1016,6 +1018,18 @@ func (s *Service) Shutdown(ctx context.Context) error {
 				log.Errorf("error stopping API server: %v", err)
 				if shutdownErr == nil {
 					shutdownErr = err
+				}
+			}
+		}
+
+		if s.coreManager != nil {
+			flushCtx, cancelFlush := context.WithTimeout(ctx, authPersistenceFlushTimeout)
+			errFlush := s.coreManager.FlushPersistence(flushCtx)
+			cancelFlush()
+			if errFlush != nil {
+				log.Warnf("failed to flush auth persistence queue: %v", errFlush)
+				if shutdownErr == nil {
+					shutdownErr = errFlush
 				}
 			}
 		}

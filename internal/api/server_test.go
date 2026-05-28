@@ -108,12 +108,38 @@ func TestManagementUsageRequiresManagementAuthAndPopsArray(t *testing.T) {
 		t.Fatalf("missing key status = %d, want %d body=%s", missingKeyRR.Code, http.StatusUnauthorized, missingKeyRR.Body.String())
 	}
 
-	legacyReq := httptest.NewRequest(http.MethodGet, "/v0/management/usage?count=2", nil)
-	legacyReq.Header.Set("Authorization", "Bearer test-management-key")
-	legacyRR := httptest.NewRecorder()
-	server.engine.ServeHTTP(legacyRR, legacyReq)
-	if legacyRR.Code != http.StatusNotFound {
-		t.Fatalf("legacy usage status = %d, want %d body=%s", legacyRR.Code, http.StatusNotFound, legacyRR.Body.String())
+	historyMissingKeyReq := httptest.NewRequest(http.MethodGet, "/v0/management/usage", nil)
+	historyMissingKeyRR := httptest.NewRecorder()
+	server.engine.ServeHTTP(historyMissingKeyRR, historyMissingKeyReq)
+	if historyMissingKeyRR.Code != http.StatusUnauthorized {
+		t.Fatalf("history missing key status = %d, want %d body=%s", historyMissingKeyRR.Code, http.StatusUnauthorized, historyMissingKeyRR.Body.String())
+	}
+
+	historyReq := httptest.NewRequest(http.MethodGet, "/v0/management/usage", nil)
+	historyReq.Header.Set("Authorization", "Bearer test-management-key")
+	historyRR := httptest.NewRecorder()
+	server.engine.ServeHTTP(historyRR, historyReq)
+	if historyRR.Code != http.StatusOK {
+		t.Fatalf("history status = %d, want %d body=%s", historyRR.Code, http.StatusOK, historyRR.Body.String())
+	}
+	var historyPayload struct {
+		Usage struct {
+			TotalRequests int64                  `json:"total_requests"`
+			SuccessCount  int64                  `json:"success_count"`
+			FailureCount  int64                  `json:"failure_count"`
+			TotalTokens   int64                  `json:"total_tokens"`
+			APIs          map[string]interface{} `json:"apis"`
+		} `json:"usage"`
+		FailedRequests int64 `json:"failed_requests"`
+	}
+	if errUnmarshal := json.Unmarshal(historyRR.Body.Bytes(), &historyPayload); errUnmarshal != nil {
+		t.Fatalf("unmarshal history response: %v body=%s", errUnmarshal, historyRR.Body.String())
+	}
+	if historyPayload.Usage.APIs == nil {
+		t.Fatalf("history usage.apis is nil, want empty object")
+	}
+	if historyPayload.Usage.TotalRequests != 0 || historyPayload.Usage.SuccessCount != 0 || historyPayload.Usage.FailureCount != 0 || historyPayload.Usage.TotalTokens != 0 || historyPayload.FailedRequests != 0 {
+		t.Fatalf("empty history snapshot has unexpected totals: %#v", historyPayload)
 	}
 
 	authReq := httptest.NewRequest(http.MethodGet, "/v0/management/usage-queue?count=2", nil)

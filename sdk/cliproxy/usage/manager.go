@@ -186,6 +186,11 @@ func (m *Manager) Publish(ctx context.Context, record Record) {
 	if m == nil {
 		return
 	}
+	if ctx == nil {
+		ctx = context.Background()
+	} else {
+		ctx = context.WithoutCancel(ctx)
+	}
 	// ensure worker is running even if Start was not called explicitly
 	m.Start(context.Background())
 	m.mu.Lock()
