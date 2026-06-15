@@ -244,6 +244,51 @@ func TestConfigSynthesizer_ClaudeKeys_SkipsEmptyAndHeaders(t *testing.T) {
 	}
 }
 
+func TestConfigSynthesizer_FireworksKeysMultiple(t *testing.T) {
+	synth := NewConfigSynthesizer()
+	ctx := &SynthesisContext{
+		Config: &config.Config{
+			FireworksKey: []config.FireworksKey{
+				{APIKey: "fw-key-1"},
+				{APIKey: "fw-key-2", Prefix: "team", Priority: 3, Headers: map[string]string{"X-Test": "value"}},
+			},
+		},
+		Now:         time.Now(),
+		IDGenerator: NewStableIDGenerator(),
+	}
+
+	auths, err := synth.Synthesize(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(auths) != 2 {
+		t.Fatalf("expected 2 auths, got %d", len(auths))
+	}
+	for i, auth := range auths {
+		if auth.Provider != "fireworks" {
+			t.Fatalf("auth[%d] provider = %q, want fireworks", i, auth.Provider)
+		}
+		if auth.Label != "fireworks-apikey" {
+			t.Fatalf("auth[%d] label = %q, want fireworks-apikey", i, auth.Label)
+		}
+		if auth.Attributes["base_url"] != "" {
+			t.Fatalf("auth[%d] base_url = %q, want empty so executor default applies", i, auth.Attributes["base_url"])
+		}
+	}
+	if auths[0].Attributes["api_key"] != "fw-key-1" || auths[1].Attributes["api_key"] != "fw-key-2" {
+		t.Fatalf("api keys = %q/%q, want fw-key-1/fw-key-2", auths[0].Attributes["api_key"], auths[1].Attributes["api_key"])
+	}
+	if auths[1].Prefix != "team" {
+		t.Fatalf("prefix = %q, want team", auths[1].Prefix)
+	}
+	if auths[1].Attributes["priority"] != "3" {
+		t.Fatalf("priority = %q, want 3", auths[1].Attributes["priority"])
+	}
+	if auths[1].Attributes["header:X-Test"] != "value" {
+		t.Fatalf("header:X-Test = %q, want value", auths[1].Attributes["header:X-Test"])
+	}
+}
+
 func TestConfigSynthesizer_CodexKeys(t *testing.T) {
 	synth := NewConfigSynthesizer()
 	ctx := &SynthesisContext{

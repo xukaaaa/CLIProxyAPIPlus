@@ -55,11 +55,20 @@ func (m *LogFormatter) Format(entry *log.Entry) ([]byte, error) {
 	}
 	levelStr := fmt.Sprintf("%-5s", level)
 
-	// Build fields string (only print fields in logFieldOrder)
+	// Render model field inline before level to make it easy to scan per-request logs.
+	modelStr := ""
+	if model, ok := entry.Data["model"].(string); ok && model != "" {
+		modelStr = fmt.Sprintf(" [model=%s]", model)
+	}
+
+	// Build fields string (only print fields in logFieldOrder, excluding model rendered above)
 	var fieldsStr string
 	if len(entry.Data) > 0 {
 		var fields []string
 		for _, k := range logFieldOrder {
+			if k == "model" {
+				continue
+			}
 			if v, ok := entry.Data[k]; ok {
 				fields = append(fields, fmt.Sprintf("%s=%v", k, v))
 			}
@@ -71,9 +80,9 @@ func (m *LogFormatter) Format(entry *log.Entry) ([]byte, error) {
 
 	var formatted string
 	if entry.Caller != nil {
-		formatted = fmt.Sprintf("[%s] [%s] [%s] [%s:%d] %s%s\n", timestamp, reqID, levelStr, filepath.Base(entry.Caller.File), entry.Caller.Line, message, fieldsStr)
+		formatted = fmt.Sprintf("[%s] [%s]%s [%s] [%s:%d] %s%s\n", timestamp, reqID, modelStr, levelStr, filepath.Base(entry.Caller.File), entry.Caller.Line, message, fieldsStr)
 	} else {
-		formatted = fmt.Sprintf("[%s] [%s] [%s] %s%s\n", timestamp, reqID, levelStr, message, fieldsStr)
+		formatted = fmt.Sprintf("[%s] [%s]%s [%s] %s%s\n", timestamp, reqID, modelStr, levelStr, message, fieldsStr)
 	}
 	buffer.WriteString(formatted)
 

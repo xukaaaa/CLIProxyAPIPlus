@@ -1279,6 +1279,10 @@ func (m *Manager) rebuildAPIKeyModelAliasLocked(cfg *internalconfig.Config) {
 			if entry := resolveCodexAPIKeyConfig(cfg, auth); entry != nil {
 				compileAPIKeyModelAliasForModels(byAlias, entry.Models)
 			}
+		case "fireworks":
+			if entry := resolveFireworksAPIKeyConfig(cfg, auth); entry != nil {
+				compileAPIKeyModelAliasForModels(byAlias, entry.Models)
+			}
 		case "vertex":
 			if entry := resolveVertexAPIKeyConfig(cfg, auth); entry != nil {
 				compileAPIKeyModelAliasForModels(byAlias, entry.Models)
@@ -2389,6 +2393,8 @@ func (m *Manager) applyAPIKeyModelAlias(auth *Auth, requestedModel string) strin
 		upstreamModel = resolveUpstreamModelForClaudeAPIKey(cfg, auth, requestedModel)
 	case "codex":
 		upstreamModel = resolveUpstreamModelForCodexAPIKey(cfg, auth, requestedModel)
+	case "fireworks":
+		upstreamModel = resolveUpstreamModelForFireworksAPIKey(cfg, auth, requestedModel)
 	case "vertex":
 		upstreamModel = resolveUpstreamModelForVertexAPIKey(cfg, auth, requestedModel)
 	default:
@@ -2468,6 +2474,13 @@ func resolveCodexAPIKeyConfig(cfg *internalconfig.Config, auth *Auth) *internalc
 	return resolveAPIKeyConfig(cfg.CodexKey, auth)
 }
 
+func resolveFireworksAPIKeyConfig(cfg *internalconfig.Config, auth *Auth) *internalconfig.FireworksKey {
+	if cfg == nil {
+		return nil
+	}
+	return resolveAPIKeyConfig(cfg.FireworksKey, auth)
+}
+
 func resolveVertexAPIKeyConfig(cfg *internalconfig.Config, auth *Auth) *internalconfig.VertexCompatKey {
 	if cfg == nil {
 		return nil
@@ -2493,6 +2506,14 @@ func resolveUpstreamModelForClaudeAPIKey(cfg *internalconfig.Config, auth *Auth,
 
 func resolveUpstreamModelForCodexAPIKey(cfg *internalconfig.Config, auth *Auth, requestedModel string) string {
 	entry := resolveCodexAPIKeyConfig(cfg, auth)
+	if entry == nil {
+		return ""
+	}
+	return resolveModelAliasFromConfigModels(requestedModel, asModelAliasEntries(entry.Models))
+}
+
+func resolveUpstreamModelForFireworksAPIKey(cfg *internalconfig.Config, auth *Auth, requestedModel string) string {
+	entry := resolveFireworksAPIKeyConfig(cfg, auth)
 	if entry == nil {
 		return ""
 	}
@@ -2876,6 +2897,23 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 								suspendReason = "quota"
 								shouldSuspendModel = true
 								setModelQuota = true
+							}
+						case 412:
+							if result.Provider != "fireworks" {
+								state.NextRetryAfter = time.Time{}
+								break
+							}
+							state.StatusMessage = "account_suspended"
+							if auth.LastError != nil {
+								auth.StatusMessage = "account_suspended"
+							}
+							if disableCooling {
+								state.NextRetryAfter = time.Time{}
+							} else {
+								next := now.Add(30 * 24 * time.Hour)
+								state.NextRetryAfter = next
+								suspendReason = "account_suspended"
+								shouldSuspendModel = true
 							}
 						case 408, 500, 502, 503, 504:
 							if disableCooling {
@@ -3384,6 +3422,19 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 		}
 		auth.Quota.NextRecoverAt = next
 		auth.NextRetryAfter = next
+	case 412:
+		if auth.Provider != "fireworks" {
+			if auth.StatusMessage == "" {
+				auth.StatusMessage = "request failed"
+			}
+			break
+		}
+		auth.StatusMessage = "account_suspended"
+		if disableCooling {
+			auth.NextRetryAfter = time.Time{}
+		} else {
+			auth.NextRetryAfter = now.Add(30 * 24 * time.Hour)
+		}
 	case 408, 500, 502, 503, 504:
 		auth.StatusMessage = "transient upstream error"
 		if disableCooling {

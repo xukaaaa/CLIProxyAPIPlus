@@ -4,8 +4,11 @@
 package logging
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"runtime/debug"
 	"strings"
@@ -58,6 +61,12 @@ func GinLogrusLogger() gin.HandlerFunc {
 			c.Request = c.Request.WithContext(ctx)
 		}
 
+		// Extract model from JSON body for AI API paths before downstream handlers read it.
+		modelName := ""
+		if isAIAPIPath(path) {
+			modelName = modelFromRequestBody(c)
+		}
+
 		c.Next()
 
 		if shouldSkipGinRequestLogging(c) {
@@ -92,6 +101,9 @@ func GinLogrusLogger() gin.HandlerFunc {
 		}
 
 		entry := log.WithField("request_id", requestID)
+		if modelName != "" {
+			entry = entry.WithField("model", modelName)
+		}
 
 		switch {
 		case statusCode >= http.StatusInternalServerError:
@@ -102,6 +114,26 @@ func GinLogrusLogger() gin.HandlerFunc {
 			entry.Info(logLine)
 		}
 	}
+}
+
+// modelFromRequestBody reads the JSON request body, restores it for downstream handlers,
+// and returns the value of the "model" field. It returns an empty string on any error.
+func modelFromRequestBody(c *gin.Context) string {
+	if c.Request == nil || c.Request.Body == nil {
+		return ""
+	}
+	body, err := io.ReadAll(c.Request.Body)
+	if err != nil {
+		return ""
+	}
+	c.Request.Body = io.NopCloser(bytes.NewReader(body))
+	var payload struct {
+		Model string `json:"model"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return ""
+	}
+	return payload.Model
 }
 
 // isAIAPIPath checks if the given path is an AI API endpoint that should have request ID tracking.

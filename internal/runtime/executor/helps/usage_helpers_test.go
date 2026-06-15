@@ -89,6 +89,22 @@ func TestParseOpenAIStreamUsageResponsesFields(t *testing.T) {
 	}
 }
 
+func TestParseFireworksClaudeStreamUsageIgnoresMessageStart(t *testing.T) {
+	startLine := []byte(`data: {"type":"message_start","message":{"usage":{"input_tokens":0,"output_tokens":0}},"usage":{"input_tokens":0,"output_tokens":0}}`)
+	if _, ok := ParseFireworksClaudeStreamUsage(startLine); ok {
+		t.Fatal("message_start usage should be ignored")
+	}
+
+	deltaLine := []byte(`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"input_tokens":13,"output_tokens":25,"cache_creation_input_tokens":2,"cache_read_input_tokens":3}}`)
+	detail, ok := ParseFireworksClaudeStreamUsage(deltaLine)
+	if !ok {
+		t.Fatal("message_delta usage should be parsed")
+	}
+	if detail.InputTokens != 13 || detail.OutputTokens != 25 || detail.CacheCreationTokens != 2 || detail.CacheReadTokens != 3 {
+		t.Fatalf("usage detail = %+v, want input=13 output=25 cache_creation=2 cache_read=3", detail)
+	}
+}
+
 func TestParseClaudeUsageIncludesCacheTokensInTotal(t *testing.T) {
 	data := []byte(`{"usage":{"input_tokens":3085,"output_tokens":253,"cache_read_input_tokens":7,"cache_creation_input_tokens":19514}}`)
 	detail := ParseClaudeUsage(data)
