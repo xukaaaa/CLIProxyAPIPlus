@@ -124,6 +124,9 @@ type Config struct {
 	// ClaudeKey defines a list of Claude API key configurations as specified in the YAML configuration file.
 	ClaudeKey []ClaudeKey `yaml:"claude-api-key" json:"claude-api-key"`
 
+	// FireworksKey defines a list of Fireworks API key configurations as specified in the YAML configuration file.
+	FireworksKey []FireworksKey `yaml:"fireworks-api-key" json:"fireworks-api-key"`
+
 	// ClaudeHeaderDefaults configures default header values for Claude API requests.
 	// These are used as fallbacks when the client does not send its own headers.
 	ClaudeHeaderDefaults ClaudeHeaderDefaults `yaml:"claude-header-defaults" json:"claude-header-defaults"`
@@ -467,6 +470,51 @@ type ClaudeModel struct {
 
 func (m ClaudeModel) GetName() string  { return m.Name }
 func (m ClaudeModel) GetAlias() string { return m.Alias }
+
+// FireworksKey represents the configuration for a Fireworks API key.
+type FireworksKey struct {
+	// APIKey is the authentication key for accessing Fireworks API services.
+	APIKey string `yaml:"api-key" json:"api-key"`
+
+	// Priority controls selection preference when multiple credentials match.
+	Priority int `yaml:"priority,omitempty" json:"priority,omitempty"`
+
+	// Prefix optionally namespaces models for this credential.
+	Prefix string `yaml:"prefix,omitempty" json:"prefix,omitempty"`
+
+	// BaseURL optionally overrides the Fireworks API endpoint.
+	BaseURL string `yaml:"base-url,omitempty" json:"base-url,omitempty"`
+
+	// ProxyURL overrides the global proxy setting for this API key if provided.
+	ProxyURL string `yaml:"proxy-url,omitempty" json:"proxy-url,omitempty"`
+
+	// Models defines upstream model names and aliases for request routing.
+	Models []FireworksModel `yaml:"models,omitempty" json:"models,omitempty"`
+
+	// Headers optionally adds extra HTTP headers for requests sent with this key.
+	Headers map[string]string `yaml:"headers,omitempty" json:"headers,omitempty"`
+
+	// ExcludedModels lists model IDs that should be excluded for this provider.
+	ExcludedModels []string `yaml:"excluded-models,omitempty" json:"excluded-models,omitempty"`
+
+	// DisableCooling disables auth/model cooldown scheduling for this credential when true.
+	DisableCooling bool `yaml:"disable-cooling,omitempty" json:"disable-cooling,omitempty"`
+}
+
+func (k FireworksKey) GetAPIKey() string  { return k.APIKey }
+func (k FireworksKey) GetBaseURL() string { return k.BaseURL }
+
+// FireworksModel describes a mapping between an alias and the actual upstream model name.
+type FireworksModel struct {
+	// Name is the upstream model identifier used when issuing requests.
+	Name string `yaml:"name" json:"name"`
+
+	// Alias is the client-facing model name that maps to Name.
+	Alias string `yaml:"alias" json:"alias"`
+}
+
+func (m FireworksModel) GetName() string  { return m.Name }
+func (m FireworksModel) GetAlias() string { return m.Alias }
 
 // CodexKey represents the configuration for a Codex API key,
 // including the API key itself and an optional base URL for the API endpoint.

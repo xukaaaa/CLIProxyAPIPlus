@@ -559,6 +559,22 @@ func ParseClaudeStreamUsage(line []byte) (usage.Detail, bool) {
 	return parseClaudeUsageNode(usageNode), true
 }
 
+func ParseFireworksClaudeStreamUsage(line []byte) (usage.Detail, bool) {
+	payload := jsonPayload(line)
+	if len(payload) == 0 || !gjson.ValidBytes(payload) {
+		return usage.Detail{}, false
+	}
+	root := gjson.ParseBytes(payload)
+	if root.Get("type").String() != "message_delta" {
+		return usage.Detail{}, false
+	}
+	usageNode := root.Get("usage")
+	if !usageNode.Exists() {
+		return usage.Detail{}, false
+	}
+	return parseClaudeUsageNode(usageNode), true
+}
+
 func parseClaudeUsageNode(usageNode gjson.Result) usage.Detail {
 	cacheReadTokens := usageNode.Get("cache_read_input_tokens").Int()
 	cacheCreationTokens := usageNode.Get("cache_creation_input_tokens").Int()

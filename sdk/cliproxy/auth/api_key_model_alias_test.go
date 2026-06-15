@@ -105,9 +105,10 @@ func TestAPIKeyModelAlias_ConfigHotReload(t *testing.T) {
 
 func TestAPIKeyModelAlias_MultipleProviders(t *testing.T) {
 	cfg := &internalconfig.Config{
-		GeminiKey: []internalconfig.GeminiKey{{APIKey: "gemini-key", Models: []internalconfig.GeminiModel{{Name: "gemini-2.5-pro", Alias: "gp"}}}},
-		ClaudeKey: []internalconfig.ClaudeKey{{APIKey: "claude-key", Models: []internalconfig.ClaudeModel{{Name: "claude-sonnet-4", Alias: "cs4"}}}},
-		CodexKey:  []internalconfig.CodexKey{{APIKey: "codex-key", Models: []internalconfig.CodexModel{{Name: "o3", Alias: "o"}}}},
+		GeminiKey:    []internalconfig.GeminiKey{{APIKey: "gemini-key", Models: []internalconfig.GeminiModel{{Name: "gemini-2.5-pro", Alias: "gp"}}}},
+		ClaudeKey:    []internalconfig.ClaudeKey{{APIKey: "claude-key", Models: []internalconfig.ClaudeModel{{Name: "claude-sonnet-4", Alias: "cs4"}}}},
+		CodexKey:     []internalconfig.CodexKey{{APIKey: "codex-key", Models: []internalconfig.CodexModel{{Name: "o3", Alias: "o"}}}},
+		FireworksKey: []internalconfig.FireworksKey{{APIKey: "fireworks-key", Models: []internalconfig.FireworksModel{{Name: "accounts/fireworks/models/kimi-k2p7-code", Alias: "kimi-code"}}}},
 	}
 
 	mgr := NewManager(nil, nil, nil)
@@ -117,6 +118,7 @@ func TestAPIKeyModelAlias_MultipleProviders(t *testing.T) {
 	_, _ = mgr.Register(ctx, &Auth{ID: "gemini-auth", Provider: "gemini", Attributes: map[string]string{"api_key": "gemini-key"}})
 	_, _ = mgr.Register(ctx, &Auth{ID: "claude-auth", Provider: "claude", Attributes: map[string]string{"api_key": "claude-key"}})
 	_, _ = mgr.Register(ctx, &Auth{ID: "codex-auth", Provider: "codex", Attributes: map[string]string{"api_key": "codex-key"}})
+	_, _ = mgr.Register(ctx, &Auth{ID: "fireworks-auth", Provider: "fireworks", Attributes: map[string]string{"api_key": "fireworks-key"}})
 
 	tests := []struct {
 		authID, input, want string
@@ -124,12 +126,35 @@ func TestAPIKeyModelAlias_MultipleProviders(t *testing.T) {
 		{"gemini-auth", "gp", "gemini-2.5-pro"},
 		{"claude-auth", "cs4", "claude-sonnet-4"},
 		{"codex-auth", "o", "o3"},
+		{"fireworks-auth", "kimi-code", "accounts/fireworks/models/kimi-k2p7-code"},
 	}
 
 	for _, tt := range tests {
 		if resolved := mgr.lookupAPIKeyUpstreamModel(tt.authID, tt.input); resolved != tt.want {
 			t.Errorf("lookupAPIKeyUpstreamModel(%q, %q) = %q, want %q", tt.authID, tt.input, resolved, tt.want)
 		}
+	}
+}
+
+func TestExecutionModelCandidatesResolvesFireworksAlias(t *testing.T) {
+	cfg := &internalconfig.Config{
+		FireworksKey: []internalconfig.FireworksKey{{
+			APIKey: "fireworks-key",
+			Models: []internalconfig.FireworksModel{{
+				Name:  "accounts/fireworks/models/kimi-k2p7-code",
+				Alias: "kimi-code",
+			}},
+		}},
+	}
+
+	mgr := NewManager(nil, nil, nil)
+	mgr.SetConfig(cfg)
+	auth := &Auth{ID: "fireworks-auth", Provider: "fireworks", Attributes: map[string]string{"api_key": "fireworks-key"}}
+	_, _ = mgr.Register(context.Background(), auth)
+
+	candidates := mgr.executionModelCandidates(auth, "kimi-code")
+	if len(candidates) != 1 || candidates[0] != "accounts/fireworks/models/kimi-k2p7-code" {
+		t.Fatalf("execution model candidates = %v, want Fireworks upstream model", candidates)
 	}
 }
 

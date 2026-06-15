@@ -2,6 +2,32 @@ package registry
 
 import "testing"
 
+func TestGetFireworksModelsIncludesTemporaryKimiCodeModel(t *testing.T) {
+	models := GetFireworksModels()
+	for _, model := range models {
+		if model == nil {
+			continue
+		}
+		if model.ID == "accounts/fireworks/models/kimi-k2p7-code" {
+			if model.Type != "fireworks" {
+				t.Fatalf("model type = %q, want fireworks", model.Type)
+			}
+			return
+		}
+	}
+	t.Fatal("expected Fireworks Kimi K2P7 Code model")
+}
+
+func TestGetStaticModelDefinitionsByChannelFireworks(t *testing.T) {
+	models := GetStaticModelDefinitionsByChannel("fireworks")
+	if len(models) == 0 {
+		t.Fatal("expected fireworks static models")
+	}
+	if got := LookupStaticModelInfo("accounts/fireworks/models/kimi-k2p7-code"); got == nil {
+		t.Fatal("expected LookupStaticModelInfo to find fireworks model")
+	}
+}
+
 func TestWithXAIBuiltinsIncludesVideoPreviewModel(t *testing.T) {
 	models := WithXAIBuiltins(nil)
 
