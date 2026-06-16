@@ -7,11 +7,12 @@ import (
 )
 
 const (
-	codexBuiltinImageModelID        = "gpt-image-2"
-	xaiBuiltinImageModelID          = "grok-imagine-image"
-	xaiBuiltinImageQualityModelID   = "grok-imagine-image-quality"
-	xaiBuiltinVideoModelID          = "grok-imagine-video"
-	xaiBuiltinVideo15PreviewModelID = "grok-imagine-video-1.5-preview"
+	codexBuiltinImageModelID             = "gpt-image-2"
+	fireworksKimiK2P7CodePriorityModelID = "accounts/fireworks/models/kimi-k2p7-code-priority"
+	xaiBuiltinImageModelID               = "grok-imagine-image"
+	xaiBuiltinImageQualityModelID        = "grok-imagine-image-quality"
+	xaiBuiltinVideoModelID               = "grok-imagine-video"
+	xaiBuiltinVideo15PreviewModelID      = "grok-imagine-video-1.5-preview"
 )
 
 // staticModelsJSON mirrors the top-level structure of models.json.
@@ -83,7 +84,28 @@ func GetKimiModels() []*ModelInfo {
 
 // GetFireworksModels returns the standard Fireworks model definitions.
 func GetFireworksModels() []*ModelInfo {
-	return cloneModelInfos(getModels().Fireworks)
+	return WithFireworksBuiltins(cloneModelInfos(getModels().Fireworks))
+}
+
+// WithFireworksBuiltins injects hard-coded Fireworks model definitions that should
+// not depend on remote models.json updates. Built-ins replace any matching IDs
+// already present in the provided slice.
+func WithFireworksBuiltins(models []*ModelInfo) []*ModelInfo {
+	return upsertModelInfos(models, fireworksKimiK2P7CodePriorityModelInfo())
+}
+
+func fireworksKimiK2P7CodePriorityModelInfo() *ModelInfo {
+	return &ModelInfo{
+		ID:                  fireworksKimiK2P7CodePriorityModelID,
+		Object:              "model",
+		Created:             1780396800,
+		OwnedBy:             "fireworks",
+		Type:                "fireworks",
+		DisplayName:         "Kimi K2P7 Code Priority",
+		Description:         "Kimi K2P7 Code on Fireworks AI with priority service tier",
+		ContextLength:       262144,
+		MaxCompletionTokens: 65536,
+	}
 }
 
 // GetAntigravityModels returns the standard Antigravity model definitions.

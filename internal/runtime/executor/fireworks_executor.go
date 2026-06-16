@@ -70,7 +70,7 @@ func (e *FireworksExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth
 	if opts.Alt == "responses/compact" {
 		return resp, statusErr{code: http.StatusNotImplemented, msg: "/responses/compact not supported"}
 	}
-	baseModel := thinking.ParseSuffix(req.Model).ModelName
+	baseModel, serviceTier := fireworksNormalizePriorityModel(thinking.ParseSuffix(req.Model).ModelName)
 	baseURL, _ := fireworksCreds(auth)
 	if baseURL == "" {
 		baseURL = defaultFireworksBaseURL
@@ -88,6 +88,9 @@ func (e *FireworksExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth
 	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayloadSource, opts.Stream)
 	body := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, opts.Stream)
 	body, _ = sjson.SetBytes(body, "model", baseModel)
+	if serviceTier != "" {
+		body, _ = sjson.SetBytes(body, "service_tier", serviceTier)
+	}
 
 	body, err = thinking.ApplyThinking(body, req.Model, from.String(), to.String(), e.Identifier())
 	if err != nil {
@@ -153,7 +156,7 @@ func (e *FireworksExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 	if opts.Alt == "responses/compact" {
 		return nil, statusErr{code: http.StatusNotImplemented, msg: "/responses/compact not supported"}
 	}
-	baseModel := thinking.ParseSuffix(req.Model).ModelName
+	baseModel, serviceTier := fireworksNormalizePriorityModel(thinking.ParseSuffix(req.Model).ModelName)
 	baseURL, _ := fireworksCreds(auth)
 	if baseURL == "" {
 		baseURL = defaultFireworksBaseURL
@@ -172,6 +175,9 @@ func (e *FireworksExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 	body := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, true)
 	body, _ = sjson.SetBytes(body, "model", baseModel)
 	body, _ = sjson.SetBytes(body, "stream", true)
+	if serviceTier != "" {
+		body, _ = sjson.SetBytes(body, "service_tier", serviceTier)
+	}
 
 	body, err = thinking.ApplyThinking(body, req.Model, from.String(), to.String(), e.Identifier())
 	if err != nil {
@@ -278,6 +284,18 @@ func (e *FireworksExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth
 		return refreshed, err
 	}
 	return auth, nil
+}
+
+const fireworksPriorityModelSuffix = "-priority"
+
+// fireworksNormalizePriorityModel handles the virtual "-priority" Fireworks model
+// convention: a model name ending in "-priority" maps to the base model and adds
+// service_tier="priority" to the upstream request.
+func fireworksNormalizePriorityModel(model string) (string, string) {
+	if strings.HasSuffix(model, fireworksPriorityModelSuffix) {
+		return strings.TrimSuffix(model, fireworksPriorityModelSuffix), "priority"
+	}
+	return model, ""
 }
 
 func fireworksCreds(auth *cliproxyauth.Auth) (baseURL, apiKey string) {

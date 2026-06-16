@@ -18,6 +18,22 @@ func TestGetFireworksModelsIncludesTemporaryKimiCodeModel(t *testing.T) {
 	t.Fatal("expected Fireworks Kimi K2P7 Code model")
 }
 
+func TestGetFireworksModelsIncludesKimiCodePriorityModel(t *testing.T) {
+	models := GetFireworksModels()
+	for _, model := range models {
+		if model == nil {
+			continue
+		}
+		if model.ID == "accounts/fireworks/models/kimi-k2p7-code-priority" {
+			if model.Type != "fireworks" {
+				t.Fatalf("model type = %q, want fireworks", model.Type)
+			}
+			return
+		}
+	}
+	t.Fatal("expected Fireworks Kimi K2P7 Code Priority model")
+}
+
 func TestGetStaticModelDefinitionsByChannelFireworks(t *testing.T) {
 	models := GetStaticModelDefinitionsByChannel("fireworks")
 	if len(models) == 0 {

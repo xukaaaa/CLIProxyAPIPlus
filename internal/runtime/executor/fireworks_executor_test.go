@@ -236,3 +236,88 @@ func TestFireworksExecutorPrepareRequestUsesBearerOnly(t *testing.T) {
 		t.Fatalf("x-api-key = %q, want empty", got)
 	}
 }
+
+func TestFireworksExecutorPriorityModelAddsServiceTier(t *testing.T) {
+	var gotBody []byte
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var err error
+		gotBody, err = io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read body: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"text","text":"ok"}],"model":"accounts/fireworks/models/kimi-k2p7-code","stop_reason":"end_turn","stop_sequence":null,"usage":{"input_tokens":2,"output_tokens":1}}`))
+	}))
+	defer server.Close()
+
+	executor := NewFireworksExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"api_key":  "fw-test",
+		"base_url": server.URL,
+	}}
+	payload := []byte(`{"model":"accounts/fireworks/models/kimi-k2p7-code-priority","max_tokens":4097,"messages":[{"role":"user","content":"hi"}]}`)
+
+	_, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "accounts/fireworks/models/kimi-k2p7-code-priority",
+		Payload: payload,
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("claude")})
+	if err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+
+	if got := gjson.GetBytes(gotBody, "model").String(); got != "accounts/fireworks/models/kimi-k2p7-code" {
+		t.Fatalf("model = %q, want accounts/fireworks/models/kimi-k2p7-code; body=%s", got, string(gotBody))
+	}
+	if got := gjson.GetBytes(gotBody, "service_tier").String(); got != "priority" {
+		t.Fatalf("service_tier = %q, want priority; body=%s", got, string(gotBody))
+	}
+}
+
+func TestFireworksExecutorPriorityModelStreamAddsServiceTier(t *testing.T) {
+	var gotBody []byte
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var err error
+		gotBody, err = io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read body: %v", err)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}\n\n"))
+	}))
+	defer server.Close()
+
+	executor := NewFireworksExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"api_key":  "fw-test",
+		"base_url": server.URL,
+	}}
+	payload := []byte(`{"model":"accounts/fireworks/models/kimi-k2p7-code-priority","max_tokens":16,"messages":[{"role":"user","content":"hi"}],"stream":true}`)
+
+	result, err := executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "accounts/fireworks/models/kimi-k2p7-code-priority",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		Stream:       true,
+		SourceFormat: sdktranslator.FromString("claude"),
+	})
+	if err != nil {
+		t.Fatalf("ExecuteStream error: %v", err)
+	}
+	for chunk := range result.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("stream chunk error: %v", chunk.Err)
+		}
+	}
+
+	if got := gjson.GetBytes(gotBody, "model").String(); got != "accounts/fireworks/models/kimi-k2p7-code" {
+		t.Fatalf("model = %q, want accounts/fireworks/models/kimi-k2p7-code; body=%s", got, string(gotBody))
+	}
+	if got := gjson.GetBytes(gotBody, "service_tier").String(); got != "priority" {
+		t.Fatalf("service_tier = %q, want priority; body=%s", got, string(gotBody))
+	}
+	if got := gjson.GetBytes(gotBody, "stream").Bool(); !got {
+		t.Fatalf("stream = %v, want true; body=%s", got, string(gotBody))
+	}
+}
