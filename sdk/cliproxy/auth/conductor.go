@@ -1790,6 +1790,10 @@ func (m *Manager) rebuildAPIKeyModelAliasLocked(cfg *internalconfig.Config) {
 			if entry := resolveCodexAPIKeyConfig(cfg, auth); entry != nil {
 				compileAPIKeyModelAliasForModels(byAlias, entry.Models)
 			}
+		case "fireworks":
+			if entry := resolveFireworksAPIKeyConfig(cfg, auth); entry != nil {
+				compileAPIKeyModelAliasForModels(byAlias, entry.Models)
+			}
 		case "vertex":
 			if entry := resolveVertexAPIKeyConfig(cfg, auth); entry != nil {
 				compileAPIKeyModelAliasForModels(byAlias, entry.Models)
@@ -2907,6 +2911,8 @@ func (m *Manager) applyAPIKeyModelAlias(auth *Auth, requestedModel string) strin
 		upstreamModel = resolveUpstreamModelForClaudeAPIKey(cfg, auth, requestedModel)
 	case "codex":
 		upstreamModel = resolveUpstreamModelForCodexAPIKey(cfg, auth, requestedModel)
+	case "fireworks":
+		upstreamModel = resolveUpstreamModelForFireworksAPIKey(cfg, auth, requestedModel)
 	case "vertex":
 		upstreamModel = resolveUpstreamModelForVertexAPIKey(cfg, auth, requestedModel)
 	default:
@@ -2986,6 +2992,13 @@ func resolveCodexAPIKeyConfig(cfg *internalconfig.Config, auth *Auth) *internalc
 	return resolveAPIKeyConfig(cfg.CodexKey, auth)
 }
 
+func resolveFireworksAPIKeyConfig(cfg *internalconfig.Config, auth *Auth) *internalconfig.FireworksKey {
+	if cfg == nil {
+		return nil
+	}
+	return resolveAPIKeyConfig(cfg.FireworksKey, auth)
+}
+
 func resolveVertexAPIKeyConfig(cfg *internalconfig.Config, auth *Auth) *internalconfig.VertexCompatKey {
 	if cfg == nil {
 		return nil
@@ -3011,6 +3024,14 @@ func resolveUpstreamModelForClaudeAPIKey(cfg *internalconfig.Config, auth *Auth,
 
 func resolveUpstreamModelForCodexAPIKey(cfg *internalconfig.Config, auth *Auth, requestedModel string) string {
 	entry := resolveCodexAPIKeyConfig(cfg, auth)
+	if entry == nil {
+		return ""
+	}
+	return resolveModelAliasFromConfigModels(requestedModel, asModelAliasEntries(entry.Models))
+}
+
+func resolveUpstreamModelForFireworksAPIKey(cfg *internalconfig.Config, auth *Auth, requestedModel string) string {
+	entry := resolveFireworksAPIKeyConfig(cfg, auth)
 	if entry == nil {
 		return ""
 	}
@@ -3457,6 +3478,18 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 								shouldSuspendModel = true
 								setModelQuota = true
 							}
+						case 412:
+							if strings.ToLower(strings.TrimSpace(result.Provider)) != "fireworks" {
+								state.NextRetryAfter = time.Time{}
+								break
+							}
+							state.StatusMessage = "account_suspended"
+							if auth.LastError != nil {
+								auth.StatusMessage = "account_suspended"
+							}
+							state.NextRetryAfter = now.Add(30 * 24 * time.Hour)
+							suspendReason = "account_suspended"
+							shouldSuspendModel = true
 						case 408, 500, 502, 503, 504:
 							if disableCooling {
 								state.NextRetryAfter = time.Time{}
@@ -3473,8 +3506,11 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 					updateAggregatedAvailability(auth, now)
 				}
 			} else {
-				disableCooling := m.cooldownDisabledForAuth(auth)
-				applyAuthFailureState(auth, result.Error, result.RetryAfter, now, disableCooling)
+				suspend, reason := applyAuthFailureState(auth, result.Error, result.RetryAfter, now)
+				if suspend && reason != "" {
+					shouldSuspendModel = suspend
+					suspendReason = reason
+				}
 			}
 		}
 
@@ -3503,6 +3539,24 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 		registry.GetGlobalRegistry().ResumeClientModel(result.AuthID, result.Model)
 	} else if shouldSuspendModel {
 		registry.GetGlobalRegistry().SuspendClientModel(result.AuthID, result.Model, suspendReason)
+	}
+	if shouldSuspendModel && suspendReason == "account_suspended" && authSnapshot != nil {
+		suspended := SuspendFireworksAccountModels(ctx, m, registry.GetGlobalRegistry(), authSnapshot, result.Model, suspendReason)
+		for _, id := range suspended {
+			m.RefreshSchedulerEntry(id)
+		}
+		if result.Model == "" {
+			// Empty-model suspension adds model states to the triggering auth after
+			// authSnapshot and persistSnapshot were cloned. Re-clone it so the
+			// scheduler and persistence see the suspended states.
+			m.mu.Lock()
+			if auth, ok := m.auths[result.AuthID]; ok && auth != nil {
+				authSnapshot = auth.Clone()
+				persistSnapshot = auth.Clone()
+			}
+			m.mu.Unlock()
+			m.RefreshSchedulerEntry(result.AuthID)
+		}
 	}
 
 	m.hook.OnResult(ctx, result)
@@ -3901,13 +3955,14 @@ func isRequestInvalidError(err error) bool {
 	}
 }
 
-func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Duration, now time.Time, disableCooling bool) {
+func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Duration, now time.Time) (shouldSuspendModel bool, suspendReason string) {
 	if auth == nil {
-		return
+		return false, ""
 	}
 	if isRequestScopedNotFoundResultError(resultErr) {
-		return
+		return false, ""
 	}
+	disableCooling := quotaCooldownDisabledForAuth(auth)
 	auth.Unavailable = true
 	auth.Status = StatusError
 	auth.UpdatedAt = now
@@ -3928,7 +3983,7 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 			BackoffLevel:  backoffLevel,
 		}
 		auth.NextRetryAfter = next
-		return
+		return false, ""
 	}
 	switch statusCode {
 	case 401:
@@ -3970,6 +4025,16 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 		}
 		auth.Quota.NextRecoverAt = next
 		auth.NextRetryAfter = next
+	case 412:
+		if strings.ToLower(strings.TrimSpace(auth.Provider)) != "fireworks" {
+			if auth.StatusMessage == "" {
+				auth.StatusMessage = "request failed"
+			}
+			break
+		}
+		auth.StatusMessage = "account_suspended"
+		auth.NextRetryAfter = now.Add(30 * 24 * time.Hour)
+		return true, "account_suspended"
 	case 408, 500, 502, 503, 504:
 		auth.StatusMessage = "transient upstream error"
 		if disableCooling {
@@ -3982,6 +4047,7 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 			auth.StatusMessage = "request failed"
 		}
 	}
+	return false, ""
 }
 
 // nextQuotaCooldown returns the next cooldown duration and updated backoff level for repeated quota errors.

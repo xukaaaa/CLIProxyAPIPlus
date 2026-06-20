@@ -237,6 +237,26 @@ nonstream-keepalive-interval: 0
 #       - "*-mini"          # wildcard matching suffix (e.g. gpt-5-codex-mini)
 #       - "*codex*"         # wildcard matching substring (e.g. gpt-5-codex-low)
 
+# Fireworks API keys
+# fireworks-api-key:
+#   - api-key: "fw_..." # default base URL: https://api.fireworks.ai/inference
+#   - api-key: "fw_..." # multiple keys share the static model list and are round-robined
+#     prefix: "test" # optional: require calls like "test/accounts/fireworks/models/kimi-k2p7-code" to target this credential
+#     disable-cooling: false # optional: per-auth override for auth/model cooldown scheduling
+#     base-url: "https://api.fireworks.ai/inference" # optional: custom Fireworks-compatible endpoint
+#     headers:
+#       X-Custom-Header: "custom-value"
+#     proxy-url: "socks5://proxy.example.com:1080" # optional: per-key proxy override
+#     models: &fireworks-models # optional: YAML anchor to share model list across keys
+#       - name: "accounts/fireworks/models/kimi-k2p7-code" # upstream model name
+#         alias: "kimi-k2.7-code"                          # client alias mapped to the upstream model
+#       - name: "accounts/fireworks/models/qwen3p7-plus"
+#         alias: "qwen-3.7-plus"
+#     excluded-models:
+#       - "accounts/fireworks/models/legacy-*"
+#   - api-key: "fw_..."
+#     models: *fireworks-models # reuse the shared model list via YAML anchor
+
 # Claude API keys
 # claude-api-key:
 #   - api-key: "sk-atSM..." # use the official claude API key, no need to set the base url

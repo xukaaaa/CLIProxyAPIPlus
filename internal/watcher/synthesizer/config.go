@@ -30,6 +30,8 @@ func (s *ConfigSynthesizer) Synthesize(ctx *SynthesisContext) ([]*coreauth.Auth,
 	out = append(out, s.synthesizeGeminiKeys(ctx)...)
 	// Claude API Keys
 	out = append(out, s.synthesizeClaudeKeys(ctx)...)
+	// Fireworks API Keys
+	out = append(out, s.synthesizeFireworksKeys(ctx)...)
 	// Codex API Keys
 	out = append(out, s.synthesizeCodexKeys(ctx)...)
 	// OpenAI-compat
@@ -147,6 +149,62 @@ func (s *ConfigSynthesizer) synthesizeClaudeKeys(ctx *SynthesisContext) []*corea
 			UpdatedAt:  now,
 		}
 		ApplyAuthExcludedModelsMeta(a, cfg, ck.ExcludedModels, "apikey")
+		if len(a.Metadata) == 0 {
+			a.Metadata = nil
+		}
+		out = append(out, a)
+	}
+	return out
+}
+
+// synthesizeFireworksKeys creates Auth entries for Fireworks API keys.
+func (s *ConfigSynthesizer) synthesizeFireworksKeys(ctx *SynthesisContext) []*coreauth.Auth {
+	cfg := ctx.Config
+	now := ctx.Now
+	idGen := ctx.IDGenerator
+
+	out := make([]*coreauth.Auth, 0, len(cfg.FireworksKey))
+	for i := range cfg.FireworksKey {
+		fk := cfg.FireworksKey[i]
+		key := strings.TrimSpace(fk.APIKey)
+		if key == "" {
+			continue
+		}
+		prefix := strings.TrimSpace(fk.Prefix)
+		base := strings.TrimSpace(fk.BaseURL)
+		id, token := idGen.Next("fireworks:apikey", key, base)
+		attrs := map[string]string{
+			"source":  fmt.Sprintf("config:fireworks[%s]", token),
+			"api_key": key,
+		}
+		metadata := map[string]any{}
+		if fk.DisableCooling {
+			metadata["disable_cooling"] = true
+		}
+		if fk.Priority != 0 {
+			attrs["priority"] = strconv.Itoa(fk.Priority)
+		}
+		if base != "" {
+			attrs["base_url"] = base
+		}
+		if hash := diff.ComputeFireworksModelsHash(fk.Models); hash != "" {
+			attrs["models_hash"] = hash
+		}
+		addConfigHeadersToAttrs(fk.Headers, attrs)
+		proxyURL := strings.TrimSpace(fk.ProxyURL)
+		a := &coreauth.Auth{
+			ID:         id,
+			Provider:   "fireworks",
+			Label:      "fireworks-apikey",
+			Prefix:     prefix,
+			Status:     coreauth.StatusActive,
+			ProxyURL:   proxyURL,
+			Attributes: attrs,
+			Metadata:   metadata,
+			CreatedAt:  now,
+			UpdatedAt:  now,
+		}
+		ApplyAuthExcludedModelsMeta(a, cfg, fk.ExcludedModels, "apikey")
 		if len(a.Metadata) == 0 {
 			a.Metadata = nil
 		}

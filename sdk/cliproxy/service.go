@@ -897,6 +897,7 @@ func baselineExecutorAuths() []*coreauth.Auth {
 		"aistudio",
 		"antigravity",
 		"kimi",
+		"fireworks",
 		"xai",
 		"openai-compatibility",
 	}
@@ -976,6 +977,8 @@ func (s *Service) registerExecutorForAuth(a *coreauth.Auth, forceReplace bool) {
 		s.coreManager.RegisterExecutor(executor.NewClaudeExecutor(s.cfg))
 	case "kimi":
 		s.coreManager.RegisterExecutor(executor.NewKimiExecutor(s.cfg))
+	case "fireworks":
+		s.coreManager.RegisterExecutor(executor.NewFireworksExecutor(s.cfg))
 	case "xai":
 		s.coreManager.RegisterExecutor(executor.NewXAIAutoExecutor(s.cfg))
 	default:
@@ -1886,6 +1889,17 @@ func (s *Service) registerModelsForAuth(ctx context.Context, a *coreauth.Auth) {
 	case "kimi":
 		models = registry.GetKimiModels()
 		models = applyExcludedModels(models, excluded)
+	case "fireworks":
+		models = registry.GetFireworksModels()
+		if entry := s.resolveConfigFireworksKey(a); entry != nil {
+			if len(entry.Models) > 0 {
+				models = buildFireworksConfigModels(entry)
+			}
+			if authKind == "apikey" {
+				excluded = entry.ExcludedModels
+			}
+		}
+		models = applyExcludedModels(models, excluded)
 	case "xai":
 		models = registry.GetXAIModels()
 		models = applyExcludedModels(models, excluded)
@@ -2125,6 +2139,32 @@ func (s *Service) resolveConfigVertexCompatKey(auth *coreauth.Auth) *config.Vert
 			if strings.EqualFold(strings.TrimSpace(entry.APIKey), attrKey) {
 				return entry
 			}
+		}
+	}
+	return nil
+}
+
+func (s *Service) resolveConfigFireworksKey(auth *coreauth.Auth) *config.FireworksKey {
+	if auth == nil || s.cfg == nil {
+		return nil
+	}
+	var attrKey, attrBase string
+	if auth.Attributes != nil {
+		attrKey = strings.TrimSpace(auth.Attributes["api_key"])
+		attrBase = strings.TrimSpace(auth.Attributes["base_url"])
+	}
+	for i := range s.cfg.FireworksKey {
+		entry := &s.cfg.FireworksKey[i]
+		cfgKey := strings.TrimSpace(entry.APIKey)
+		cfgBase := strings.TrimSpace(entry.BaseURL)
+		if attrKey != "" && strings.EqualFold(cfgKey, attrKey) {
+			if cfgBase == "" || strings.EqualFold(cfgBase, attrBase) {
+				return entry
+			}
+			continue
+		}
+		if attrKey == "" && attrBase != "" && strings.EqualFold(cfgBase, attrBase) {
+			return entry
 		}
 	}
 	return nil
@@ -2403,6 +2443,13 @@ func buildCodexConfigModels(entry *config.CodexKey) []*ModelInfo {
 		return nil
 	}
 	return registry.WithCodexBuiltins(buildConfigModels(entry.Models, "openai", "openai"))
+}
+
+func buildFireworksConfigModels(entry *config.FireworksKey) []*ModelInfo {
+	if entry == nil {
+		return nil
+	}
+	return buildConfigModels(entry.Models, "fireworks", "fireworks")
 }
 
 func rewriteModelInfoName(name, oldID, newID string) string {

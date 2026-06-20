@@ -7,12 +7,13 @@ import (
 )
 
 const (
-	codexBuiltinImage15ModelID      = "gpt-image-1.5"
-	codexBuiltinImageModelID        = "gpt-image-2"
-	xaiBuiltinImageModelID          = "grok-imagine-image"
-	xaiBuiltinImageQualityModelID   = "grok-imagine-image-quality"
-	xaiBuiltinVideoModelID          = "grok-imagine-video"
-	xaiBuiltinVideo15PreviewModelID = "grok-imagine-video-1.5-preview"
+	codexBuiltinImage15ModelID           = "gpt-image-1.5"
+	codexBuiltinImageModelID             = "gpt-image-2"
+	fireworksKimiK2P7CodePriorityModelID = "accounts/fireworks/models/kimi-k2p7-code-priority"
+	xaiBuiltinImageModelID               = "grok-imagine-image"
+	xaiBuiltinImageQualityModelID        = "grok-imagine-image-quality"
+	xaiBuiltinVideoModelID               = "grok-imagine-video"
+	xaiBuiltinVideo15PreviewModelID      = "grok-imagine-video-1.5-preview"
 )
 
 // staticModelsJSON mirrors the top-level structure of models.json.
@@ -26,6 +27,7 @@ type staticModelsJSON struct {
 	CodexPlus   []*ModelInfo `json:"codex-plus"`
 	CodexPro    []*ModelInfo `json:"codex-pro"`
 	Kimi        []*ModelInfo `json:"kimi"`
+	Fireworks   []*ModelInfo `json:"fireworks"`
 	Antigravity []*ModelInfo `json:"antigravity"`
 	XAI         []*ModelInfo `json:"xai"`
 }
@@ -73,6 +75,32 @@ func GetCodexProModels() []*ModelInfo {
 // GetKimiModels returns the standard Kimi (Moonshot AI) model definitions.
 func GetKimiModels() []*ModelInfo {
 	return cloneModelInfos(getModels().Kimi)
+}
+
+// GetFireworksModels returns the standard Fireworks model definitions.
+func GetFireworksModels() []*ModelInfo {
+	return WithFireworksBuiltins(cloneModelInfos(getModels().Fireworks))
+}
+
+// WithFireworksBuiltins injects hard-coded Fireworks model definitions that should
+// not depend on remote models.json updates. Built-ins replace any matching IDs
+// already present in the provided slice.
+func WithFireworksBuiltins(models []*ModelInfo) []*ModelInfo {
+	return upsertModelInfos(models, fireworksKimiK2P7CodePriorityModelInfo())
+}
+
+func fireworksKimiK2P7CodePriorityModelInfo() *ModelInfo {
+	return &ModelInfo{
+		ID:                  fireworksKimiK2P7CodePriorityModelID,
+		Object:              "model",
+		Created:             1780396800,
+		OwnedBy:             "fireworks",
+		Type:                "fireworks",
+		DisplayName:         "Kimi K2P7 Code Priority",
+		Description:         "Kimi K2P7 Code on Fireworks AI with priority service tier",
+		ContextLength:       262144,
+		MaxCompletionTokens: 65536,
+	}
 }
 
 // GetAntigravityModels returns the standard Antigravity model definitions.
@@ -275,6 +303,7 @@ func cloneModelInfos(models []*ModelInfo) []*ModelInfo {
 //   - aistudio
 //   - codex
 //   - kimi
+//   - fireworks
 //   - antigravity
 //   - xai
 func GetStaticModelDefinitionsByChannel(channel string) []*ModelInfo {
@@ -292,6 +321,8 @@ func GetStaticModelDefinitionsByChannel(channel string) []*ModelInfo {
 		return GetCodexProModels()
 	case "kimi":
 		return GetKimiModels()
+	case "fireworks":
+		return GetFireworksModels()
 	case "antigravity":
 		return GetAntigravityModels()
 	case "xai", "x-ai", "grok":
@@ -316,6 +347,7 @@ func LookupStaticModelInfo(modelID string) *ModelInfo {
 		data.AIStudio,
 		data.CodexPro,
 		data.Kimi,
+		data.Fireworks,
 		data.Antigravity,
 		data.XAI,
 	}

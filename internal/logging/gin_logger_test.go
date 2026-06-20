@@ -1,9 +1,12 @@
 package logging
 
 import (
+	"bytes"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -121,5 +124,44 @@ func TestGinLogrusLoggerAddsRequestIDForCodexBackend(t *testing.T) {
 	}
 	if requestIDFromGin != requestIDFromContext {
 		t.Fatalf("expected Gin request ID %q to match context request ID %q", requestIDFromGin, requestIDFromContext)
+	}
+}
+
+func TestModelFromRequestBodyExtractsAndRestoresBody(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	body := strings.NewReader(`{"model":"claude-sonnet-4-6","messages":[]}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", body)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = req
+
+	model := modelFromRequestBody(c)
+	if model != "claude-sonnet-4-6" {
+		t.Fatalf("expected model %q, got %q", "claude-sonnet-4-6", model)
+	}
+
+	// Ensure body is restored for downstream handlers.
+	restored, err := io.ReadAll(c.Request.Body)
+	if err != nil {
+		t.Fatalf("failed to read restored body: %v", err)
+	}
+	if !bytes.Equal(restored, []byte(`{"model":"claude-sonnet-4-6","messages":[]}`)) {
+		t.Fatalf("restored body mismatch: %q", string(restored))
+	}
+}
+
+func TestModelFromRequestBodyReturnsEmptyForMissingModel(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	body := strings.NewReader(`{"messages":[]}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", body)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = req
+
+	model := modelFromRequestBody(c)
+	if model != "" {
+		t.Fatalf("expected empty model, got %q", model)
 	}
 }

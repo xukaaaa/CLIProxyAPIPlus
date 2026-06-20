@@ -64,6 +64,28 @@ func TestEnsureExecutorsForAuthWithMode_CodexForceReplace(t *testing.T) {
 	}
 }
 
+func TestEnsureExecutorsForAuth_FireworksBindsNativeExecutor(t *testing.T) {
+	service := &Service{
+		cfg:         &config.Config{},
+		coreManager: coreauth.NewManager(nil, nil, nil),
+	}
+	auth := &coreauth.Auth{
+		ID:       "fireworks-auth-1",
+		Provider: "fireworks",
+		Status:   coreauth.StatusActive,
+	}
+
+	service.ensureExecutorsForAuth(auth)
+
+	gotExecutor, ok := service.coreManager.Executor("fireworks")
+	if !ok || gotExecutor == nil {
+		t.Fatal("expected fireworks executor after bind")
+	}
+	if _, ok := gotExecutor.(*executor.FireworksExecutor); !ok {
+		t.Fatalf("fireworks executor type = %T, want *executor.FireworksExecutor", gotExecutor)
+	}
+}
+
 func TestEnsureExecutorsForAuth_XAIBindsAutoExecutor(t *testing.T) {
 	service := &Service{
 		cfg:         &config.Config{},

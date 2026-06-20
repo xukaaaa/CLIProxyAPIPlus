@@ -213,6 +213,7 @@ func detectChangedProviders(oldData, newData *staticModelsJSON) []string {
 		{"codex", oldData.CodexPlus, newData.CodexPlus},
 		{"codex", oldData.CodexPro, newData.CodexPro},
 		{"kimi", oldData.Kimi, newData.Kimi},
+		{"fireworks", oldData.Fireworks, newData.Fireworks},
 		{"antigravity", oldData.Antigravity, newData.Antigravity},
 		{"xai", oldData.XAI, newData.XAI},
 	}
@@ -333,6 +334,7 @@ func validateModelsCatalog(data *staticModelsJSON) error {
 		{name: "codex-plus", models: data.CodexPlus},
 		{name: "codex-pro", models: data.CodexPro},
 		{name: "kimi", models: data.Kimi},
+		{name: "fireworks", models: data.Fireworks},
 		{name: "antigravity", models: data.Antigravity},
 		{name: "xai", models: data.XAI},
 	}
@@ -341,6 +343,9 @@ func validateModelsCatalog(data *staticModelsJSON) error {
 		if err := validateModelSection(section.name, section.models); err != nil {
 			return err
 		}
+	}
+	if len(data.Fireworks) == 0 {
+		return fmt.Errorf("fireworks section is empty")
 	}
 	return nil
 }

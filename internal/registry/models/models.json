@@ -1649,6 +1649,52 @@
       }
     }
   ],
+  "fireworks": [
+    {
+      "id": "accounts/fireworks/models/kimi-k2p7-code",
+      "object": "model",
+      "created": 1780396800,
+      "owned_by": "fireworks",
+      "type": "fireworks",
+      "display_name": "Kimi K2P7 Code",
+      "description": "Kimi K2P7 Code on Fireworks AI",
+      "context_length": 262144,
+      "max_completion_tokens": 65536
+    },
+    {
+      "id": "accounts/fireworks/models/kimi-k2p7-code-priority",
+      "object": "model",
+      "created": 1780396800,
+      "owned_by": "fireworks",
+      "type": "fireworks",
+      "display_name": "Kimi K2P7 Code Priority",
+      "description": "Kimi K2P7 Code on Fireworks AI with priority service tier",
+      "context_length": 262144,
+      "max_completion_tokens": 65536
+    },
+    {
+      "id": "accounts/fireworks/routers/kimi-k2p7-code-fast",
+      "object": "model",
+      "created": 1780396800,
+      "owned_by": "fireworks",
+      "type": "fireworks",
+      "display_name": "Kimi K2P7 Code Fast",
+      "description": "Kimi K2P7 Code Fast (Router) on Fireworks AI",
+      "context_length": 262144,
+      "max_completion_tokens": 65536
+    },
+    {
+      "id": "accounts/fireworks/models/qwen3p7-plus",
+      "object": "model",
+      "created": 1780396800,
+      "owned_by": "fireworks",
+      "type": "fireworks",
+      "display_name": "Qwen 3.7 Plus",
+      "description": "Qwen 3.7 Plus on Fireworks AI",
+      "context_length": 262144,
+      "max_completion_tokens": 65536
+    }
+  ],
   "antigravity": [
     {
       "id": "claude-opus-4-6-thinking",
