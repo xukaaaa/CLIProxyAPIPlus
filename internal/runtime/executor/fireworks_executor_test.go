@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
@@ -34,8 +35,8 @@ func TestFireworksExecutorExecuteBuildsMessagesRequest(t *testing.T) {
 		if err != nil {
 			t.Fatalf("read body: %v", err)
 		}
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"text","text":"ok"}],"model":"accounts/fireworks/models/kimi-k2p7-code","stop_reason":"end_turn","stop_sequence":null,"usage":{"input_tokens":2,"output_tokens":1}}`))
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(fireworksSSETextMessage("msg_1", "accounts/fireworks/models/kimi-k2p7-code", "ok", 2, 1)))
 	}))
 	defer server.Close()
 
@@ -65,18 +66,79 @@ func TestFireworksExecutorExecuteBuildsMessagesRequest(t *testing.T) {
 	if gotXAPIKey != "" {
 		t.Fatalf("x-api-key = %q, want empty", gotXAPIKey)
 	}
-	if bytes.Contains(gotBody, []byte(`"stream":true`)) {
-		t.Fatalf("non-stream request forced stream=true: %s", string(gotBody))
+	if !bytes.Contains(gotBody, []byte(`"stream":true`)) {
+		t.Fatalf("claude-client request should force stream=true: %s", string(gotBody))
 	}
 	if got := gjson.GetBytes(gotBody, "max_tokens").Int(); got != 4097 {
 		t.Fatalf("max_tokens = %d, want 4097; body=%s", got, string(gotBody))
 	}
-	if gotAccept == "text/event-stream" {
-		t.Fatalf("Accept = %q, non-stream should not request SSE", gotAccept)
+	if gotAccept != "text/event-stream" {
+		t.Fatalf("Accept = %q, want text/event-stream", gotAccept)
 	}
 	if got := gjson.GetBytes(resp.Payload, "content.0.text").String(); got != "ok" {
 		t.Fatalf("response text = %q, want ok; payload=%s", got, string(resp.Payload))
 	}
+	if got := gjson.GetBytes(resp.Payload, "usage.output_tokens").Int(); got != 1 {
+		t.Fatalf("usage.output_tokens = %d, want 1; payload=%s", got, string(resp.Payload))
+	}
+}
+
+func TestFireworksExecutorExecuteClaudeClientAggregatesSSEToMessage(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(fireworksSSETextMessage("msg_agg", "accounts/fireworks/models/kimi-k2p7-code", "hello world", 25, 30)))
+	}))
+	defer server.Close()
+
+	executor := NewFireworksExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"api_key":  "fw-test",
+		"base_url": server.URL,
+	}}
+	payload := []byte(`{"model":"accounts/fireworks/models/kimi-k2p7-code","max_tokens":6000,"messages":[{"role":"user","content":"hi"}]}`)
+
+	resp, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "accounts/fireworks/models/kimi-k2p7-code",
+		Payload: payload,
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("claude")})
+	if err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+	if got := gjson.GetBytes(resp.Payload, "type").String(); got != "message" {
+		t.Fatalf("type = %q, want message; payload=%s", got, string(resp.Payload))
+	}
+	if got := gjson.GetBytes(resp.Payload, "id").String(); got != "msg_agg" {
+		t.Fatalf("id = %q, want msg_agg; payload=%s", got, string(resp.Payload))
+	}
+	if got := gjson.GetBytes(resp.Payload, "content.0.text").String(); got != "hello world" {
+		t.Fatalf("content.0.text = %q, want 'hello world'; payload=%s", got, string(resp.Payload))
+	}
+	if got := gjson.GetBytes(resp.Payload, "stop_reason").String(); got != "end_turn" {
+		t.Fatalf("stop_reason = %q, want end_turn; payload=%s", got, string(resp.Payload))
+	}
+	if got := gjson.GetBytes(resp.Payload, "usage.input_tokens").Int(); got != 25 {
+		t.Fatalf("usage.input_tokens = %d, want 25; payload=%s", got, string(resp.Payload))
+	}
+	if got := gjson.GetBytes(resp.Payload, "usage.output_tokens").Int(); got != 30 {
+		t.Fatalf("usage.output_tokens = %d, want 30; payload=%s", got, string(resp.Payload))
+	}
+}
+
+// fireworksSSETextMessage builds a minimal Anthropic-protocol SSE stream carrying
+// a single text content block with the given id/model/text and usage counts.
+func fireworksSSETextMessage(id, model, text string, inputTokens, outputTokens int64) string {
+	return "event: message_start\n" +
+		`data: {"type":"message_start","message":{"id":"` + id + `","type":"message","role":"assistant","model":"` + model + `","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":` + strconv.FormatInt(inputTokens, 10) + `,"output_tokens":1}}}` + "\n\n" +
+		"event: content_block_start\n" +
+		`data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}` + "\n\n" +
+		"event: content_block_delta\n" +
+		`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":` + strconv.Quote(text) + `}}` + "\n\n" +
+		"event: content_block_stop\n" +
+		`data: {"type":"content_block_stop","index":0}` + "\n\n" +
+		"event: message_delta\n" +
+		`data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":` + strconv.FormatInt(outputTokens, 10) + `}}` + "\n\n" +
+		"event: message_stop\n" +
+		`data: {"type":"message_stop"}` + "\n\n"
 }
 
 func TestFireworksExecutionSessionIDPrefersExecutionMetadata(t *testing.T) {
@@ -132,8 +194,8 @@ func TestFireworksExecutorExecuteSetsSessionAffinityHeader(t *testing.T) {
 		if err != nil {
 			t.Fatalf("read body: %v", err)
 		}
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"text","text":"ok"}],"model":"accounts/fireworks/models/kimi-k2p7-code","stop_reason":"end_turn","stop_sequence":null,"usage":{"input_tokens":2,"output_tokens":1}}`))
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(fireworksSSETextMessage("msg_1", "accounts/fireworks/models/kimi-k2p7-code", "ok", 2, 1)))
 	}))
 	defer server.Close()
 
@@ -246,8 +308,8 @@ func TestFireworksExecutorPriorityModelAddsServiceTier(t *testing.T) {
 		if err != nil {
 			t.Fatalf("read body: %v", err)
 		}
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"text","text":"ok"}],"model":"accounts/fireworks/models/kimi-k2p7-code","stop_reason":"end_turn","stop_sequence":null,"usage":{"input_tokens":2,"output_tokens":1}}`))
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(fireworksSSETextMessage("msg_1", "accounts/fireworks/models/kimi-k2p7-code", "ok", 2, 1)))
 	}))
 	defer server.Close()
 
@@ -327,8 +389,8 @@ func TestFireworksExecutorExecuteUsesMetadataCredentials(t *testing.T) {
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotAuth = r.Header.Get("Authorization")
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"text","text":"ok"}],"model":"accounts/fireworks/models/kimi-k2p7-code","stop_reason":"end_turn","stop_sequence":null,"usage":{"input_tokens":2,"output_tokens":1}}`))
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(fireworksSSETextMessage("msg_1", "accounts/fireworks/models/kimi-k2p7-code", "ok", 2, 1)))
 	}))
 	defer server.Close()
 
@@ -351,5 +413,40 @@ func TestFireworksExecutorExecuteUsesMetadataCredentials(t *testing.T) {
 	}
 	if gotAuth != "Bearer fw-meta" {
 		t.Fatalf("Authorization = %q, want Bearer fw-meta", gotAuth)
+	}
+}
+
+func TestFireworksExecutorCountTokensCountsLocally(t *testing.T) {
+	executor := NewFireworksExecutor(&config.Config{})
+	payload := []byte(`{"model":"accounts/fireworks/models/kimi-k2p7-code","messages":[{"role":"user","content":"hi"}]}`)
+
+	resp, err := executor.CountTokens(context.Background(), nil, cliproxyexecutor.Request{
+		Model:   "accounts/fireworks/models/kimi-k2p7-code",
+		Payload: payload,
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("claude")})
+	if err != nil {
+		t.Fatalf("CountTokens error: %v", err)
+	}
+	if got := gjson.GetBytes(resp.Payload, "input_tokens").Int(); got <= 0 {
+		t.Fatalf("input_tokens = %d, want > 0; payload=%s", got, string(resp.Payload))
+	}
+	if got := gjson.GetBytes(resp.Payload, "output_tokens").Int(); got != 0 {
+		t.Fatalf("output_tokens = %d, want 0; payload=%s", got, string(resp.Payload))
+	}
+}
+
+func TestFireworksExecutorCountTokensNormalizesPriorityModel(t *testing.T) {
+	executor := NewFireworksExecutor(&config.Config{})
+	payload := []byte(`{"model":"accounts/fireworks/models/minimax-m3-priority","messages":[{"role":"user","content":"hello"}]}`)
+
+	resp, err := executor.CountTokens(context.Background(), nil, cliproxyexecutor.Request{
+		Model:   "accounts/fireworks/models/minimax-m3-priority",
+		Payload: payload,
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("claude")})
+	if err != nil {
+		t.Fatalf("CountTokens error: %v", err)
+	}
+	if got := gjson.GetBytes(resp.Payload, "input_tokens").Int(); got <= 0 {
+		t.Fatalf("input_tokens = %d, want > 0; payload=%s", got, string(resp.Payload))
 	}
 }

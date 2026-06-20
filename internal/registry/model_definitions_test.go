@@ -44,6 +44,60 @@ func TestGetStaticModelDefinitionsByChannelFireworks(t *testing.T) {
 	}
 }
 
+func TestGetFireworksModelsIncludesGLM5p2(t *testing.T) {
+	want := map[string]struct{}{
+		"accounts/fireworks/models/glm-5p2":          {},
+		"accounts/fireworks/models/glm-5p2-priority": {},
+	}
+	models := GetFireworksModels()
+	for _, model := range models {
+		if model == nil {
+			continue
+		}
+		if _, ok := want[model.ID]; ok {
+			if model.Type != "fireworks" {
+				t.Fatalf("model %s type = %q, want fireworks", model.ID, model.Type)
+			}
+			if model.ContextLength != 262144 {
+				t.Fatalf("model %s context_length = %d, want 262144", model.ID, model.ContextLength)
+			}
+			delete(want, model.ID)
+		}
+	}
+	if len(want) > 0 {
+		for id := range want {
+			t.Fatalf("expected Fireworks model %s", id)
+		}
+	}
+}
+
+func TestGetFireworksModelsIncludesMiniMaxM3(t *testing.T) {
+	want := map[string]struct{}{
+		"accounts/fireworks/models/minimax-m3":          {},
+		"accounts/fireworks/models/minimax-m3-priority": {},
+	}
+	models := GetFireworksModels()
+	for _, model := range models {
+		if model == nil {
+			continue
+		}
+		if _, ok := want[model.ID]; ok {
+			if model.Type != "fireworks" {
+				t.Fatalf("model %s type = %q, want fireworks", model.ID, model.Type)
+			}
+			if model.ContextLength != 400000 {
+				t.Fatalf("model %s context_length = %d, want 400000", model.ID, model.ContextLength)
+			}
+			delete(want, model.ID)
+		}
+	}
+	if len(want) > 0 {
+		for id := range want {
+			t.Fatalf("expected Fireworks model %s", id)
+		}
+	}
+}
+
 func TestWithXAIBuiltinsIncludesVideoPreviewModel(t *testing.T) {
 	models := WithXAIBuiltins(nil)
 

@@ -81,15 +81,23 @@ func (e *FireworksExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth
 	from := opts.SourceFormat
 	responseFormat := cliproxyexecutor.ResponseFormatOrSource(opts)
 	to := sdktranslator.FromString("claude")
+	// Fireworks requires stream=true when max_tokens > 5000 and the claude->openai
+	// non-stream translators only parse SSE. For claude-format clients force
+	// upstream streaming and aggregate the SSE back into a single message so a
+	// non-stream claude client still gets a normal non-stream response.
+	stream := opts.Stream || from == to
 	originalPayloadSource := req.Payload
 	if len(opts.OriginalRequest) > 0 {
 		originalPayloadSource = opts.OriginalRequest
 	}
-	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayloadSource, opts.Stream)
-	body := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, opts.Stream)
+	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayloadSource, stream)
+	body := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, stream)
 	body, _ = sjson.SetBytes(body, "model", baseModel)
 	if serviceTier != "" {
 		body, _ = sjson.SetBytes(body, "service_tier", serviceTier)
+	}
+	if stream {
+		body, _ = sjson.SetBytes(body, "stream", true)
 	}
 
 	body, err = thinking.ApplyThinking(body, req.Model, from.String(), to.String(), e.Identifier())
@@ -107,6 +115,9 @@ func (e *FireworksExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth
 		return resp, err
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
+	if stream {
+		httpReq.Header.Set("Accept", "text/event-stream")
+	}
 	if sessionID := fireworksExecutionSessionID(req, opts); sessionID != "" {
 		httpReq.Header.Set("x-session-affinity", sessionID)
 	}
@@ -145,9 +156,26 @@ func (e *FireworksExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth
 		return resp, err
 	}
 	helps.AppendAPIResponseChunk(ctx, e.cfg, data)
-	reporter.Publish(ctx, helps.ParseClaudeUsage(data))
-	var param any
-	out := sdktranslator.TranslateNonStream(ctx, to, responseFormat, req.Model, opts.OriginalRequest, body, data, &param)
+	if stream {
+		if errValidate := validateClaudeStreamingResponse(data); errValidate != nil {
+			helps.RecordAPIResponseError(ctx, e.cfg, errValidate)
+			return resp, errValidate
+		}
+		for _, line := range bytes.Split(data, []byte("\n")) {
+			if detail, ok := helps.ParseFireworksClaudeStreamUsage(line); ok {
+				reporter.Publish(ctx, detail)
+			}
+		}
+	} else {
+		reporter.Publish(ctx, helps.ParseClaudeUsage(data))
+	}
+	var out []byte
+	if from == to {
+		out = helps.AggregateClaudeSSEToMessage(data)
+	} else {
+		var param any
+		out = sdktranslator.TranslateNonStream(ctx, to, responseFormat, req.Model, opts.OriginalRequest, body, data, &param)
+	}
 	resp = cliproxyexecutor.Response{Payload: out, Headers: httpResp.Header.Clone()}
 	return resp, nil
 }
@@ -275,7 +303,27 @@ func (e *FireworksExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 }
 
 func (e *FireworksExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
-	return cliproxyexecutor.Response{}, statusErr{code: http.StatusNotImplemented, msg: "fireworks count_tokens not supported"}
+	baseModel, _ := fireworksNormalizePriorityModel(thinking.ParseSuffix(req.Model).ModelName)
+
+	from := opts.SourceFormat
+	responseFormat := cliproxyexecutor.ResponseFormatOrSource(opts)
+	to := sdktranslator.FromString("openai")
+	translated := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, false)
+	translated, _ = sjson.SetBytes(translated, "model", baseModel)
+
+	enc, err := helps.TokenizerForModel(baseModel)
+	if err != nil {
+		return cliproxyexecutor.Response{}, fmt.Errorf("fireworks executor: tokenizer init failed: %w", err)
+	}
+
+	count, err := helps.CountOpenAIChatTokens(enc, translated)
+	if err != nil {
+		return cliproxyexecutor.Response{}, fmt.Errorf("fireworks executor: token counting failed: %w", err)
+	}
+
+	usageJSON := helps.BuildOpenAIUsageJSON(count)
+	translatedUsage := sdktranslator.TranslateTokenCount(ctx, to, responseFormat, count, usageJSON)
+	return cliproxyexecutor.Response{Payload: translatedUsage}, nil
 }
 
 func (e *FireworksExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*cliproxyauth.Auth, error) {
