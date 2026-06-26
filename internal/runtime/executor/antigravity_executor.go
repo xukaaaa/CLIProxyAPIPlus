@@ -35,6 +35,7 @@ import (
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	cliproxyusage "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
@@ -666,6 +667,7 @@ func (e *AntigravityExecutor) Execute(ctx context.Context, auth *cliproxyauth.Au
 	requestPath := helps.PayloadRequestPath(opts)
 	translated = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, "antigravity", from.String(), "request", translated, originalTranslated, requestedModel, requestPath, opts.Headers)
 	reporter.SetTranslatedReasoningEffort(translated, to.String())
+	helps.LogUsageTraceRequest(ctx, e.Identifier(), req.Model, baseModel, "", false, translated, to.String())
 
 	useCredits := cliproxyauth.AntigravityCreditsRequested(ctx) && antigravityCreditsRetryEnabled(e.cfg)
 
@@ -818,7 +820,9 @@ attemptLoop:
 			}
 			cacheAntigravityReasoningReplayFromResponse(ctx, replayScope, requestPayload, bodyBytes)
 			bodyBytes = e.resolveWebSearchGroundingURLs(ctx, auth, from, originalPayload, translated, bodyBytes)
-			reporter.Publish(ctx, helps.ParseAntigravityUsage(bodyBytes))
+			usageDetail := helps.ParseAntigravityUsage(bodyBytes)
+			reporter.Publish(ctx, usageDetail)
+			helps.LogUsageTraceParsed(ctx, e.Identifier(), req.Model, usageDetail, 0)
 			var param any
 			converted := sdktranslator.TranslateNonStream(ctx, to, responseFormat, req.Model, opts.OriginalRequest, translated, bodyBytes, &param)
 			resp = cliproxyexecutor.Response{Payload: converted, Headers: httpResp.Header.Clone()}
@@ -887,6 +891,7 @@ func (e *AntigravityExecutor) executeClaudeNonStream(ctx context.Context, auth *
 	requestPath := helps.PayloadRequestPath(opts)
 	translated = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, "antigravity", from.String(), "request", translated, originalTranslated, requestedModel, requestPath, opts.Headers)
 	reporter.SetTranslatedReasoningEffort(translated, to.String())
+	helps.LogUsageTraceRequest(ctx, e.Identifier(), req.Model, baseModel, "", true, translated, to.String())
 
 	useCredits := cliproxyauth.AntigravityCreditsRequested(ctx) && antigravityCreditsRetryEnabled(e.cfg)
 
@@ -1088,7 +1093,9 @@ attemptLoop:
 			resp = cliproxyexecutor.Response{Payload: e.convertStreamToNonStream(buffer.Bytes())}
 
 			resp.Payload = e.resolveWebSearchGroundingURLs(ctx, auth, from, originalPayload, translated, resp.Payload)
-			reporter.Publish(ctx, helps.ParseAntigravityUsage(resp.Payload))
+			usageDetail := helps.ParseAntigravityUsage(resp.Payload)
+			reporter.Publish(ctx, usageDetail)
+			helps.LogUsageTraceParsed(ctx, e.Identifier(), req.Model, usageDetail, 0)
 			var param any
 			converted := sdktranslator.TranslateNonStream(ctx, to, responseFormat, req.Model, opts.OriginalRequest, translated, resp.Payload, &param)
 			resp = cliproxyexecutor.Response{Payload: converted, Headers: httpResp.Header.Clone()}
@@ -1357,6 +1364,7 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 	requestPath := helps.PayloadRequestPath(opts)
 	translated = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, "antigravity", from.String(), "request", translated, originalTranslated, requestedModel, requestPath, opts.Headers)
 	reporter.SetTranslatedReasoningEffort(translated, to.String())
+	helps.LogUsageTraceRequest(ctx, e.Identifier(), req.Model, baseModel, "", true, translated, to.String())
 
 	useCredits := cliproxyauth.AntigravityCreditsRequested(ctx) && antigravityCreditsRetryEnabled(e.cfg)
 
@@ -1534,6 +1542,8 @@ attemptLoop:
 				scanner := bufio.NewScanner(resp.Body)
 				scanner.Buffer(nil, streamScannerBuffer)
 				var param any
+				var usageDetail cliproxyusage.Detail
+				usageChunks := 0
 				for scanner.Scan() {
 					line := scanner.Bytes()
 					helps.AppendAPIResponseChunk(ctx, e.cfg, line)
@@ -1551,6 +1561,8 @@ attemptLoop:
 					}
 
 					if detail, ok := helps.ParseAntigravityStreamUsage(payload); ok {
+						usageDetail = detail
+						usageChunks++
 						reporter.Publish(ctx, detail)
 					}
 
@@ -1564,6 +1576,7 @@ attemptLoop:
 						}
 					}
 				}
+				helps.LogUsageTraceParsed(ctx, e.Identifier(), req.Model, usageDetail, usageChunks)
 				tail := sdktranslator.TranslateStream(ctx, to, responseFormat, req.Model, opts.OriginalRequest, translated, []byte("[DONE]"), &param)
 				for i := range tail {
 					select {
