@@ -16,6 +16,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	cliproxyusage "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
@@ -108,6 +109,7 @@ func (e *FireworksExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth
 	requestPath := helps.PayloadRequestPath(opts)
 	body = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, to.String(), from.String(), "", body, originalTranslated, requestedModel, requestPath, opts.Headers)
 	reporter.SetTranslatedReasoningEffort(body, to.String())
+	helps.LogUsageTraceRequest(ctx, e.Identifier(), req.Model, baseModel, serviceTier, stream, body, to.String())
 
 	url := strings.TrimSuffix(baseURL, "/") + "/v1/messages"
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
@@ -156,6 +158,7 @@ func (e *FireworksExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth
 		return resp, err
 	}
 	helps.AppendAPIResponseChunk(ctx, e.cfg, data)
+	var usageDetail cliproxyusage.Detail
 	if stream {
 		if errValidate := validateClaudeStreamingResponse(data); errValidate != nil {
 			helps.RecordAPIResponseError(ctx, e.cfg, errValidate)
@@ -163,12 +166,15 @@ func (e *FireworksExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth
 		}
 		for _, line := range bytes.Split(data, []byte("\n")) {
 			if detail, ok := helps.ParseFireworksClaudeStreamUsage(line); ok {
+				usageDetail = detail
 				reporter.Publish(ctx, detail)
 			}
 		}
 	} else {
-		reporter.Publish(ctx, helps.ParseClaudeUsage(data))
+		usageDetail = helps.ParseClaudeUsage(data)
+		reporter.Publish(ctx, usageDetail)
 	}
+	helps.LogUsageTraceParsed(ctx, e.Identifier(), req.Model, usageDetail, 0)
 	var out []byte
 	if from == to {
 		out = helps.AggregateClaudeSSEToMessage(data)
@@ -215,6 +221,7 @@ func (e *FireworksExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 	requestPath := helps.PayloadRequestPath(opts)
 	body = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, to.String(), from.String(), "", body, originalTranslated, requestedModel, requestPath, opts.Headers)
 	reporter.SetTranslatedReasoningEffort(body, to.String())
+	helps.LogUsageTraceRequest(ctx, e.Identifier(), req.Model, baseModel, serviceTier, true, body, to.String())
 
 	url := strings.TrimSuffix(baseURL, "/") + "/v1/messages"
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
@@ -263,10 +270,14 @@ func (e *FireworksExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 		scanner := bufio.NewScanner(decodedBody)
 		scanner.Buffer(nil, 52_428_800)
 		var param any
+		var usageDetail cliproxyusage.Detail
+		usageChunks := 0
 		for scanner.Scan() {
 			line := scanner.Bytes()
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
 			if detail, ok := helps.ParseFireworksClaudeStreamUsage(line); ok {
+				usageDetail = detail
+				usageChunks++
 				reporter.Publish(ctx, detail)
 			}
 			clonedLine := bytes.Clone(line)
@@ -298,6 +309,7 @@ func (e *FireworksExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 			case <-ctx.Done():
 			}
 		}
+		helps.LogUsageTraceParsed(ctx, e.Identifier(), req.Model, usageDetail, usageChunks)
 	}()
 	return &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), Chunks: out}, nil
 }

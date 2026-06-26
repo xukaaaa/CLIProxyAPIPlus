@@ -835,6 +835,7 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 		return resp, errReplay
 	}
 	reporter.SetTranslatedReasoningEffort(body, to.String())
+	helps.LogUsageTraceRequest(ctx, e.Identifier(), req.Model, baseModel, "", true, body, to.String())
 
 	url := strings.TrimSuffix(baseURL, "/") + "/responses"
 	var identityState codexIdentityConfuseState
@@ -932,6 +933,7 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 
 		if detail, ok := helps.ParseCodexUsage(eventData); ok {
 			reporter.Publish(ctx, detail)
+			helps.LogUsageTraceParsed(ctx, e.Identifier(), req.Model, detail, 0)
 		}
 		publishCodexImageToolUsage(ctx, reporter, body, eventData)
 
@@ -1007,6 +1009,7 @@ func (e *CodexExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.A
 	body = sanitizeOpenAIResponsesReasoningEncryptedContent(ctx, "codex executor", body)
 	body = normalizeCodexParallelToolCallsForTools(body)
 	reporter.SetTranslatedReasoningEffort(body, to.String())
+	helps.LogUsageTraceRequest(ctx, e.Identifier(), req.Model, baseModel, "", false, body, to.String())
 
 	url := strings.TrimSuffix(baseURL, "/") + "/responses/compact"
 	var identityState codexIdentityConfuseState
@@ -1061,8 +1064,10 @@ func (e *CodexExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.A
 	}
 	upstreamData := applyCodexIdentityConfuseResponsePayload(data, identityState)
 	helps.AppendAPIResponseChunk(ctx, e.cfg, upstreamData)
-	reporter.Publish(ctx, helps.ParseOpenAIUsage(upstreamData))
+	usageDetail := helps.ParseOpenAIUsage(upstreamData)
+	reporter.Publish(ctx, usageDetail)
 	reporter.EnsurePublished(ctx)
+	helps.LogUsageTraceParsed(ctx, e.Identifier(), req.Model, usageDetail, 0)
 	var param any
 	clientData := applyCodexIdentityExposeResponsePayload(upstreamData, identityState)
 	out := sdktranslator.TranslateNonStream(ctx, to, responseFormat, req.Model, originalPayload, body, clientData, &param)
@@ -1121,6 +1126,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		return nil, errReplay
 	}
 	reporter.SetTranslatedReasoningEffort(body, to.String())
+	helps.LogUsageTraceRequest(ctx, e.Identifier(), req.Model, baseModel, "", true, body, to.String())
 
 	url := strings.TrimSuffix(baseURL, "/") + "/responses"
 	var identityState codexIdentityConfuseState

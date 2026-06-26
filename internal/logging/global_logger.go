@@ -30,7 +30,7 @@ var (
 type LogFormatter struct{}
 
 // logFieldOrder defines the display order for common log fields.
-var logFieldOrder = []string{"provider", "model", "version", "mode", "budget", "level", "original_mode", "original_value", "min", "max", "clamped_to", "error"}
+var logFieldOrder = []string{"provider", "model", "version", "base_model", "mode", "budget", "level", "original_mode", "original_value", "max_tokens", "thinking_type", "thinking_budget", "stream", "reasoning_effort", "service_tier", "min", "max", "clamped_to", "input_tokens", "output_tokens", "reasoning_tokens", "total_tokens", "usage_found", "usage_chunks", "error"}
 
 // Format renders a single log entry with custom formatting.
 func (m *LogFormatter) Format(entry *log.Entry) ([]byte, error) {
